@@ -521,7 +521,7 @@ function a_name_of(int $id): string {
 function a_msg_by_account(string $from): array {
     $out = [];
     if (a_has('bc_messages')) {
-        $agent = a_col('bc_messages', 'agent_name') ? "SUM(role<>'in' AND agent_name<>'')" : "0";
+        $agent = a_col('bc_messages', 'agent_name') ? "SUM(role='bot' OR (role<>'in' AND agent_name<>''))" : "SUM(role='bot')";
         foreach (a_rows("SELECT account_id a, COUNT(*) n, SUM(role='in') i, $agent ai FROM bc_messages
                           WHERE created_at >= ? AND LEFT(conv_id,3) <> 'dm_' AND account_id IS NOT NULL GROUP BY account_id", [$from]) as $r) {
             $out[(int)$r['a']] = ['n' => (int)$r['n'], 'in' => (int)$r['i'], 'ai' => (int)$r['ai'], 'dm_sent' => 0, 'dm_recv' => 0, 'dm_ai' => 0];
@@ -807,7 +807,7 @@ function api_overview(): array {
     $online = $seen(300); $dau = $seen(86400); $wau = $seen(7 * 86400); $mau = $seen(30 * 86400);
 
     // Messages today, and AI replies among them.
-    $agent = a_col('bc_messages', 'agent_name') ? "SUM(role<>'in' AND agent_name<>'')" : '0';
+    $agent = a_col('bc_messages', 'agent_name') ? "SUM(role='bot' OR (role<>'in' AND agent_name<>''))" : "SUM(role='bot')";
     $m = a_has('bc_messages') ? a_row("SELECT COUNT(*) n, $agent ai FROM bc_messages WHERE created_at >= ? AND LEFT(conv_id,3) <> 'dm_'", [$today]) : [];
     $dmAi = a_col('bc_dm_messages', 'ai_agent') ? 'SUM(ai_agent<>0)' : '0';
     $d = a_has('bc_dm_messages') ? a_row("SELECT COUNT(*) n, $dmAi ai FROM bc_dm_messages WHERE id >= ?", [a_dm_id_since($today)]) : [];
@@ -904,7 +904,7 @@ function a_channels_series(array $r): array {
     $tg = []; $dc = []; $dm = []; $ai = []; $in = []; $out = [];
     $bm = a_b('m.created_at', $r);
     if (a_has('bc_messages')) {
-        $agent = a_col('bc_messages', 'agent_name') ? "SUM(m.role<>'in' AND m.agent_name<>'')" : '0';
+        $agent = a_col('bc_messages', 'agent_name') ? "SUM(m.role='bot' OR (m.role<>'in' AND m.agent_name<>''))" : "SUM(m.role='bot')";
         foreach (a_rows("SELECT $bm b, COALESCE(c.platform,'telegram') p, COUNT(*) n, SUM(m.role='in') i, $agent ai
                            FROM bc_messages m LEFT JOIN bc_conversations c ON c.account_id = m.account_id AND c.id = m.conv_id
                           WHERE m.created_at >= ? AND LEFT(m.conv_id,3) <> 'dm_' GROUP BY b, p", [$r['from']]) as $x) {
@@ -1053,7 +1053,7 @@ function api_account(int $id): array {
     $tg = []; $dc = []; $dmS = []; $ai = [];
     $bm = a_b('m.created_at', $r);
     if (a_has('bc_messages')) {
-        $agent = a_col('bc_messages', 'agent_name') ? "SUM(m.role<>'in' AND m.agent_name<>'')" : '0';
+        $agent = a_col('bc_messages', 'agent_name') ? "SUM(m.role='bot' OR (m.role<>'in' AND m.agent_name<>''))" : "SUM(m.role='bot')";
         foreach (a_rows("SELECT $bm b, COALESCE(c.platform,'telegram') p, COUNT(*) n, $agent ai FROM bc_messages m
                            LEFT JOIN bc_conversations c ON c.account_id = m.account_id AND c.id = m.conv_id
                           WHERE m.account_id = ? AND m.created_at >= ? AND LEFT(m.conv_id,3) <> 'dm_' GROUP BY b, p", [$id, $from30]) as $x) {
@@ -1457,7 +1457,8 @@ function api_messages(array $q): array {
     $w = ["m.created_at >= ?", "LEFT(m.conv_id,3) <> 'dm_'"]; $p = [a_ago_sql(30 * 86400)];
     if ($needle !== '') { $w[] = 'm.content LIKE ?'; $p[] = '%' . addcslashes($needle, '%_\\') . '%'; }
     if (in_array($role, ['in', 'out'], true)) { $w[] = $role === 'in' ? "m.role='in'" : "m.role<>'in'"; }
-    if ($role === 'ai' && a_col('bc_messages', 'agent_name')) $w[] = "m.role<>'in' AND m.agent_name<>''";
+    // Agents' replies are stored as role 'bot' (older ones as 'out' with the agent's name).
+    if ($role === 'ai') $w[] = a_col('bc_messages', 'agent_name') ? "(m.role='bot' OR (m.role<>'in' AND m.agent_name<>''))" : "m.role='bot'";
     $where = implode(' AND ', $w);
     $convs = []; $convTotal = 0;
     if (a_has('bc_messages')) {
@@ -2339,6 +2340,113 @@ table.t { font-size: 12.5px; }
 .dr-tabs { padding: 10px 20px 0; }
 .dr-b { padding: 12px 20px 32px; gap: 12px; }
 
+/* ── Refined components ─────────────────────────────────────────
+   Tags are small, square-cornered labels in muted colours (a dot says
+   the state); tabs are underlined; key/value lists read as rows. */
+.chip { height: 18px; padding: 0 6px; gap: 5px; border-radius: 4px; font-size: 10.5px; font-weight: 500; letter-spacing: .01em;
+  color: var(--t2); background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.075); }
+.chip i { width: 5px; height: 5px; }
+.chip.ok { color: #9ed8b4; background: rgba(48,209,88,.055); border-color: rgba(48,209,88,.16); }
+.chip.warn { color: #e7c48a; background: rgba(245,165,36,.055); border-color: rgba(245,165,36,.18); }
+.chip.bad { color: #f0a3ab; background: rgba(255,93,108,.06); border-color: rgba(255,93,108,.2); }
+.chip.info { color: #a9cfe6; background: rgba(56,189,248,.05); border-color: rgba(56,189,248,.15); }
+.chip.guest { color: #b9bfe8; background: rgba(129,140,248,.06); border-color: rgba(129,140,248,.17); }
+.chip.ai { color: #d9b9e6; background: rgba(233,168,255,.05); border-color: rgba(233,168,255,.14); }
+.chip.tg, .chip.dc, .chip.dm { color: var(--t2); background: transparent; border-color: rgba(255,255,255,.08); }
+.chip.tg svg { color: var(--c-tg); } .chip.dc svg { color: var(--c-dc); } .chip.dm svg { color: var(--c-dm); }
+.nav a .cnt { border-radius: 4px; height: 17px; line-height: 17px; font-size: 10px; min-width: 18px; padding: 0 5px; }
+.delta { border-radius: 4px; height: 16px; font-size: 10.5px; }
+
+/* Buttons: one filled action, the rest outlined; destructive in red text. */
+.btn { font-weight: 500; }
+.btn svg { width: 13px; height: 13px; opacity: .85; }
+.btn-p { color: #effefb; background: #0f766e; border-color: rgba(94,234,212,.22); }
+.btn-p:hover { background: #118a80; }
+.btn-g { background: rgba(255,255,255,.025); border-color: rgba(255,255,255,.1); color: var(--t1); }
+.btn-g:hover { background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.16); }
+.btn-d { color: #f3a6ae; background: transparent; border-color: rgba(255,93,108,.26); }
+.btn-d:hover { background: rgba(255,93,108,.08); }
+
+/* Tabs: underlined, not pills. */
+.tabs { gap: 18px; padding: 0; border: 0; border-bottom: 1px solid var(--ln); border-radius: 0; background: none; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button { height: 32px; padding: 0 1px; border-radius: 0; font-size: 12.5px; color: var(--t3); }
+.tabs button:hover { color: var(--t1); }
+.tabs button[aria-selected="true"] { color: var(--t1); background: none; box-shadow: inset 0 -2px 0 #2dd4bf; }
+.tabs .cnt { font-size: 10.5px; color: var(--t3); font-variant-numeric: tabular-nums; }
+.toolbar .tabs { flex: 1; min-width: 0; }
+
+/* Key / value lists as ruled rows. */
+.kv { gap: 0; font-size: 12.5px; }
+.kv dt, .kv dd { padding: 7px 0; border-top: 1px solid rgba(255,255,255,.045); min-height: 33px; }
+.kv dt:first-of-type, .kv dt:first-of-type + dd { border-top: 0; padding-top: 2px; min-height: 0; }
+.kv dt { color: var(--t3); display: flex; align-items: center; gap: 6px; }
+.kv dd { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; color: var(--t1); }
+.kv dd .dim { color: var(--t3); }
+.sw { width: 30px; height: 17px; }
+.sw::after { width: 13px; height: 13px; }
+.sw[aria-checked="true"] { background: #0f766e; }
+.sw[aria-checked="true"]::after { transform: translateX(13px); }
+.sw.danger[aria-checked="true"] { background: #b4233a; }
+
+/* Account drawer */
+.drawer { background: #070d16; }
+.dr-h { gap: 12px; }
+.dr-h h2 { font-size: 15px; font-weight: 600; gap: 6px; }
+.dr-h .meta { font-size: 11.5px; }
+.dr-act { gap: 6px; }
+.dr-tabs { padding: 8px 20px 0; border-bottom: 0; }
+.dr-tabs .tabs { border-bottom: 1px solid var(--ln); }
+.dr-b, .page { grid-auto-rows: max-content; }      /* never squash a clipped row (the stat strip) */
+.dr-b .card { background: rgba(255,255,255,.018); }
+
+/* Conversation popup */
+.modal { border-radius: 12px; background: #0a111c; }
+.modal-h { padding: 16px 20px 2px; }
+.modal-h h3 { font-size: 15px; font-weight: 600; }
+.cfacts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; font-size: 12px; color: var(--t3); margin: 2px 0 8px; }
+.cfacts > span { display: inline-flex; align-items: center; gap: 6px; }
+.cfacts b { color: var(--t1); font-weight: 500; }
+.modal-f .btn:focus-visible, .modal-f .btn:focus { outline: none; box-shadow: 0 0 0 2px rgba(45,212,191,.35); }
+.cfacts .sep { width: 1px; height: 12px; background: var(--ln2); margin: 0 10px; }
+.cfacts .neg { color: #f0a3ab; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--t4); display: inline-block; }
+.dot.on { background: var(--ok); } .dot.warn { background: var(--warn); }
+.bl { display: inline-flex; align-items: center; gap: 6px; color: var(--t2); font-size: 12px; white-space: nowrap; }
+.bl .sep, .cfacts .sep { width: 1px; height: 11px; background: var(--ln2); display: inline-block; }
+.bl .sep { margin: 0 2px; }
+.neg { color: #f0a3ab; }
+.bl-err { flex-basis: 100%; text-align: right; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kv dt .pi { margin-right: 1px; }
+.csum { font-size: 12px; color: var(--t2); padding: 8px 10px; border-radius: 6px; background: rgba(255,255,255,.025); border: 1px solid var(--ln); margin-bottom: 4px; }
+.csum span { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--t3); font-weight: 600; margin-bottom: 2px; }
+.chat { display: flex; flex-direction: column; gap: 2px; padding: 8px 20px 16px; margin-top: 8px; max-height: 60vh; border-top: 1px solid var(--ln); border-bottom: 1px solid var(--ln); background: rgba(0,0,0,.18); }
+.cday { display: flex; align-items: center; gap: 10px; margin: 12px 0 6px; font-size: 10.5px; color: var(--t3); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.cday::before, .cday::after { content: ''; flex: 1; height: 1px; background: var(--ln); }
+.cmsg { display: flex; flex-direction: column; max-width: 72%; margin-top: 8px; }
+.cmsg.cont { margin-top: 2px; }
+.cmsg.in { align-self: flex-start; align-items: flex-start; }
+.cmsg.out { align-self: flex-end; align-items: flex-end; }
+.cmeta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--t3); margin: 0 2px 3px; }
+.cmeta b { color: var(--t2); font-weight: 600; }
+.cmeta .tag { font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--t3); border: 1px solid var(--ln2); border-radius: 3px; padding: 0 4px; line-height: 14px; }
+.cbub { position: relative; padding: 7px 10px 6px; border-radius: 8px; font-size: 12.8px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--t1); }
+.cmsg.in .cbub { background: rgba(255,255,255,.055); border: 1px solid rgba(255,255,255,.05); }
+.cmsg.out .cbub { background: rgba(20,184,166,.11); border: 1px solid rgba(45,212,191,.16); }
+.cmsg.failed .cbub { border-color: rgba(255,93,108,.4); }
+.cmsg.deleted .cbub { opacity: .5; text-decoration: line-through; }
+.ctime { display: block; text-align: right; font-size: 10px; color: var(--t3); margin-top: 2px; white-space: nowrap; text-decoration: none; }
+.cmedia { font-size: 10.5px; color: var(--t3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
+
+/* Latest messages: sender label */
+.mconv .from { color: var(--t3); margin-right: 4px; }
+
+/* Thin scrollbars */
+.chat, .drawer .dr-b, .side, .sres, .tw, .modal { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.14) transparent; }
+.chat::-webkit-scrollbar, .dr-b::-webkit-scrollbar, .tw::-webkit-scrollbar, .modal::-webkit-scrollbar { width: 8px; height: 8px; }
+.chat::-webkit-scrollbar-thumb, .dr-b::-webkit-scrollbar-thumb, .tw::-webkit-scrollbar-thumb, .modal::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+.chat::-webkit-scrollbar-track, .dr-b::-webkit-scrollbar-track, .tw::-webkit-scrollbar-track, .modal::-webkit-scrollbar-track { background: transparent; }
+
 @media (max-width: 1280px) { .g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1080px) { .g21, .g12, .g3 { grid-template-columns: minmax(0, 1fr); } .search .inp { width: 180px; } }
 @media (max-width: 860px) {
@@ -3105,7 +3213,7 @@ V.messages = function (d) {
   const m = S.msg;
   // One line per conversation, the one with the newest message on top.
   const fresh = (t) => Date.now() - S.skew - parseT(t) < 300000;
-  const fromChip = (x) => x.role === 'in' ? '<span class="chip">Customer</span>' : x.agent_name ? '<span class="chip ai">' + esc(x.agent_name) + '</span>' : '<span class="chip info">Seller</span>';
+  const fromChip = (x) => '<span class="from">' + (x.role === 'in' ? 'Customer' : x.agent_name ? esc(x.agent_name) : x.role === 'bot' ? 'Agent' : 'Seller') + ':</span>';
   const list = d.convs.length ? '<div class="tw"><table class="t mconv" data-nopage><thead><tr><th>Conversation</th><th>Seller</th><th>Latest message</th><th class="r">30 days</th><th class="r">Last</th></tr></thead><tbody>'
       + d.convs.map((x) => '<tr data-open="' + esc(x.conv_id) + '" data-oacc="' + x.account_id + '">'
         + '<td class="clip" style="max-width:220px"><span class="mc">' + (fresh(x.created_at) ? '<i class="newdot" title="In the last 5 minutes"></i>' : '') + platIco(x.platform) + '<b>' + esc(x.name) + '</b>' + (x.handle ? ' <span class="dim">' + esc(x.handle) + '</span>' : '') + '</span></td>'
@@ -3124,6 +3232,13 @@ V.messages = function (d) {
   return h;
 };
 
+// The same, as one quiet line of text: "● On · token saved · polled 2m ago".
+function botLine(b) {
+  const st = { on: ['on', 'On'], desktop: ['on', 'On the desktop app'], erroring: ['warn', 'Erroring'], off: ['', 'Off'] }[b.state] || ['', 'Off'];
+  return '<span class="bl"><i class="dot ' + st[0] + '"></i>' + st[1] + '<i class="sep"></i>' + (b.token ? 'Token saved' : '<span class="neg">No token</span>')
+    + (b.polled_at ? '<i class="sep"></i><span class="dim">' + esc(ago(b.polled_at)) + '</span>' : '') + '</span>'
+    + (b.error ? '<span class="neg bl-err" title="' + esc(b.error) + '">' + esc(b.error) + '</span>' : '');
+}
 // A bot's state now: receiving on the server, on the desktop app, erroring or off.
 function botState(b) {
   if (b.state === 'desktop') return '<span class="chip ok" title="The desktop app is receiving for this bot"><i></i>Desktop app</span>';
@@ -3291,12 +3406,11 @@ DT.overview = function (d) {
   const prof = d.profile || {};
   const pv = c.llm_active || '';
   h += '<div class="grid g2">'
-    + card('AI setup', '<dl class="kv"><dt>Default provider</dt><dd>' + (pv ? esc(provName(pv)) + (pv === 'builtin' ? ' <span class="chip info">your key</span>' : '') : '<span class="dim">not set</span>') + '</dd>'
-      + ['gemini', 'openai', 'claude'].map((p) => '<dt>' + PROV[p][0] + ' key</dt><dd class="mono">' + (c['llm_' + p] ? esc(c['llm_' + p]) + (c['llm_' + p + '_model'] ? ' <span class="dim">· ' + esc(c['llm_' + p + '_model']) + '</span>' : '') : '<span class="dim">—</span>') + '</dd>').join('')
+    + card('AI setup', '<dl class="kv"><dt>Default provider</dt><dd>' + (pv ? esc(provName(pv)) + (pv === 'builtin' ? ' <span class="dim">· your key</span>' : '') : '<span class="dim">Not set</span>') + '</dd>'
+      + ['gemini', 'openai', 'claude'].map((p) => '<dt>' + PROV[p][0] + ' key</dt><dd class="mono">' + (c['llm_' + p] ? esc(c['llm_' + p]) + (c['llm_' + p + '_model'] ? ' <span class="dim">· ' + esc(c['llm_' + p + '_model']) + '</span>' : '') : '<span class="dim" style="font-family:var(--font)">Not set</span>') + '</dd>').join('')
       + '</dl>')
-    + card('Channels', '<dl class="kv">' + (d.bots.length ? d.bots.map((b) => '<dt>' + plat(b.platform) + ' ' + esc(b.bot_name || b.username || '') + '</dt><dd>' + botState(b)
-        + (b.token ? ' <span class="chip ok" title="A bot token is saved">Token saved</span>' : ' <span class="chip bad" title="No bot token is saved for this bot">No token</span>')
-        + ' <span class="dim">' + esc(b.polled_at ? ago(b.polled_at) : '') + '</span>' + (b.error ? '<div class="dim" style="font-size:12px;margin-top:3px">' + esc(b.error) + '</div>' : '') + '</dd>').join('') : '<dt>Bots</dt><dd class="dim">none connected</dd>')
+    + card('Channels', '<dl class="kv">' + (d.bots.length ? d.bots.map((b) => '<dt>' + platIco(b.platform) + esc((b.platform || '').replace(/^./, (x) => x.toUpperCase())) + (b.bot_name || b.username ? ' <span class="dim">' + esc(b.bot_name || '@' + b.username) + '</span>' : '') + '</dt>'
+        + '<dd>' + botLine(b) + '</dd>').join('') : '<dt>Bots</dt><dd class="dim">None connected</dd>')
       + (d.acc.guest ? '' : '<dt>Contact page</dt><dd>' + hostSwitch('discoverable', prof.discoverable) + '</dd><dt>Guests may write</dt><dd>' + hostSwitch('allow_guests', prof.allow_guests) + '</dd><dt>Agent answers guests</dt><dd>' + hostSwitch('guest_ai', prof.guest_ai) + '</dd>')
       + '</dl>')
     + '</div>';
@@ -3376,15 +3490,34 @@ async function openConversation(acc, conv) {
   let d;
   try { d = await api('conversation', { acc: acc, conv: conv }); } catch (e) { return toast(e.message, true); }
   const c = d.conv;
-  const body = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 6px">' + plat(c.platform) + '<span class="chip">' + esc(c.stage || 'new') + '</span>' + (+c.auto_reply ? '<span class="chip ok">Agent replying</span>' : '<span class="chip">Agent off</span>')
-    + (d.customer && +d.customer.is_blocked ? '<span class="chip bad">Blocked</span>' : '') + (d.owner ? '<span class="chip info">Seller: ' + esc(d.owner.name) + '</span>' : '') + '</div>'
-    + (c.mem_summary ? '<p style="font-size:12px;margin:6px 0 0">' + esc(c.mem_summary) + '</p>' : '')
-    + '</div><div class="chat">' + (d.messages.length ? d.messages.map((m) => {
-      const cls = m.role === 'in' ? 'in' : m.role === 'bot' ? 'bot' : 'out';
-      const lab = m.role === 'in' ? (c.name || 'Customer') : m.role === 'bot' ? 'System' : (m.agent_name || 'Seller');
-      return '<div class="bub ' + cls + (+m.send_failed ? ' failed' : '') + (m.deleted_at ? ' deleted' : '') + '"><small>' + esc(lab) + ' · ' + esc(when(m.created_at)) + (m.edited_at ? ' · edited' : '') + (+m.send_failed ? ' · not delivered' : '') + '</small>'
-        + (m.media_type ? '<span class="chip">' + esc(m.media_type) + (m.media_name ? ': ' + esc(m.media_name) : '') + '</span>\n' : '') + esc(m.content) + '</div>';
-    }).join('') : empty('No messages stored')) + '</div><div>';
+  // Header: one quiet line of facts, then the agent's summary.
+  const facts = ['<span>' + platIco(c.platform) + esc((c.platform || 'telegram').replace(/^./, (x) => x.toUpperCase())) + '</span>',
+    '<span>Stage <b>' + esc(c.stage || 'new') + '</b></span>',
+    '<span><i class="dot ' + (+c.auto_reply ? 'on' : '') + '"></i>' + (+c.auto_reply ? 'Agent replying' : 'Agent off') + '</span>',
+    d.owner ? '<span>Seller <b>' + esc(d.owner.name) + '</b></span>' : '',
+    d.customer && +d.customer.is_blocked ? '<span class="neg">Blocked</span>' : '',
+    '<span>' + n(d.messages.length) + (d.messages.length >= 300 ? '+' : '') + ' messages</span>'].filter(Boolean);
+  // Messages: customer on the left, agent / seller on the right, a divider
+  // for each day, and the name only at the start of each run.
+  let prevDay = '', prevWho = '', prevT = 0;
+  const rows = d.messages.map((m) => {
+    const side = m.role === 'in' ? 'in' : 'out';
+    const who = m.role === 'in' ? (c.name || 'Customer') : (m.agent_name || (m.role === 'bot' ? 'Agent' : 'Seller'));
+    const t = parseT(m.created_at), dayK = String(m.created_at).slice(0, 10);
+    let h = '';
+    if (dayK !== prevDay) { h += '<div class="cday"><span>' + esc(day(m.created_at)) + '</span></div>'; prevDay = dayK; prevWho = ''; }
+    const cont = prevWho === side + who && t - prevT < 10 * 60000;
+    prevWho = side + who; prevT = t;
+    const tm = String(m.created_at).slice(11, 16);
+    h += '<div class="cmsg ' + side + (cont ? ' cont' : '') + (+m.send_failed ? ' failed' : '') + (m.deleted_at ? ' deleted' : '') + '">'
+      + (cont ? '' : '<div class="cmeta"><b>' + esc(who) + '</b>' + (m.agent_name ? '<span class="tag">Agent</span>' : '') + '</div>')
+      + '<div class="cbub">' + (m.media_type ? '<div class="cmedia">' + esc(m.media_type) + (m.media_name ? ' · ' + esc(m.media_name) : '') + '</div>' : '') + esc(m.content)
+      + '<span class="ctime">' + esc(tm) + (m.edited_at ? ' · edited' : '') + (+m.send_failed ? ' · not delivered' : '') + (m.deleted_at ? ' · deleted' : '') + '</span></div></div>';
+    return h;
+  }).join('');
+  const body = '<div class="cfacts">' + facts.join('<i class="sep"></i>') + '</div>'
+    + (c.mem_summary ? '<div class="csum"><span>Summary</span>' + esc(c.mem_summary) + '</div>' : '')
+    + '</div><div class="chat">' + (d.messages.length ? rows : empty('No messages stored')) + '</div><div>';
   const showSeller = d.owner && !(S.drawer && S.drawer.id === d.owner.id);
   ask({ title: (c.name || c.id) + (c.handle ? ' · ' + c.handle : ''), html: body, wide: true, ok: showSeller ? 'Open seller' : false, cancel: 'Close',
         onOpen: (w) => { const ch = $('.chat', w); if (ch) ch.scrollTop = ch.scrollHeight; } })

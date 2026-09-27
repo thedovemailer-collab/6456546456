@@ -15613,30 +15613,60 @@ const ProductWizard = ({draft, upd, onSave, onBack, allProducts, togProduct}) =>
 };
 
 // Model catalog from the server (get_llm_models), fetched once and shared.
+// It also says whether the built-in AI (the site's own key, set up by the
+// administrator) can be chosen, and its model; refresh() re-reads it when
+// the Connections page opens, since the administrator can switch it.
 const LLM_CATALOG = {
-  v: null, p: null,
-  load() {
-    if (this.v) return Promise.resolve(this.v);
+  v: null, p: null, subs: new Set(),
+  sub(fn) { this.subs.add(fn); return () => this.subs.delete(fn); },
+  load(force) {
+    if (this.v && !force) return Promise.resolve(this.v);
     if (!this.p) {
       this.p = apiFetch('get_llm_models', {})
-        .then(r => { this.p = null; if (r && !r.error) this.v = r; return this.v; })
-        .catch(() => { this.p = null; return null; });
+        .then(r => { this.p = null; if (r && !r.error) { this.v = r; this.subs.forEach(fn => { try { fn(r); } catch (_) {} }); } return this.v; })
+        .catch(() => { this.p = null; return this.v; });
     }
     return this.p;
   },
+  refresh() { return this.load(true); },
+};
+// The built-in AI when it can be chosen: {provider, model, label}, else null.
+const llmBuiltin = (cat) => {
+  const b = cat && cat.builtin;
+  return b && b.available ? b : null;
+};
+// The catalog, kept current (re-renders when it's refreshed).
+const useLlmCatalog = (refresh) => {
+  const [cat, setCat] = React.useState(LLM_CATALOG.v);
+  React.useEffect(() => {
+    let dead = false;
+    const off = LLM_CATALOG.sub(v => { if (!dead) setCat(v); });
+    (refresh ? LLM_CATALOG.refresh() : LLM_CATALOG.load()).then(v => { if (!dead && v) setCat(v); });
+    return () => { dead = true; off(); };
+  }, []);
+  return cat;
 };
 // Models the operator can actually use: only providers with an API key
 // saved, the active provider first. Labels and notes come from the server
 // catalog; until it arrives, the agent editor's own list stands in.
 const useAvailableModels = (fallbackModels) => {
   const creds = useCreds();
-  const [cat, setCat] = React.useState(LLM_CATALOG.v);
-  React.useEffect(() => { let dead = false; LLM_CATALOG.load().then(v => { if (!dead && v) setCat(v); }); return () => { dead = true; }; }, []);
+  const cat = useLlmCatalog();
   const vals = creds.values || {};
   const active = vals.llm_active || '';
   const keyed = LLM_PROVIDERS.filter(p => vals['llm_' + p.id])
     .sort((a, b) => (b.id === active) - (a.id === active));
   const options = [];
+  // On the built-in AI every agent runs the model the site set, whatever
+  // the agent says — so that one model is what there is to choose.
+  const bi = active === 'builtin' ? llmBuiltin(cat) : null;
+  if (bi) {
+    const pv = LLM_PROVIDERS.find(p => p.id === bi.provider);
+    options.push({value: bi.model, label: `${bi.label || bi.model}  (built-in AI)`, short: bi.label || bi.model,
+      group: 'Built-in AI', provider: bi.provider});
+    const providers = pv ? [{...pv, label: 'Built-in AI', full: 'Built-in AI'}] : [];
+    return {loaded: !!creds.loaded, options, preferred: bi.model, providers, builtin: true};
+  }
   keyed.forEach(p => {
     const list = cat && cat.catalog && Array.isArray(cat.catalog[p.id]) && cat.catalog[p.id].length
       ? cat.catalog[p.id]

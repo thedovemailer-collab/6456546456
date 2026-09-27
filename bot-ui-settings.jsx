@@ -259,16 +259,24 @@ const ActiveLlmPicker = ({creds, fld}) => {
   const triggerRef = React.useRef(null);
   const menuRef    = React.useRef(null);
 
-  const opts = LLM_PROVIDERS.map(p => ({
-    ...p,
-    has: !!(fld[p.id] || (creds.values || {})[`llm_${p.id}`]),
-  }));
+  // The built-in AI (the site's own key) is listed first while it's offered.
+  const cat = typeof useLlmCatalog === 'function' ? useLlmCatalog() : null;
+  const bi = typeof llmBuiltin === 'function' ? llmBuiltin(cat) : null;
+  const opts = [
+    ...((bi || active === 'builtin') ? [{ id:'builtin', label:'Built-in AI', Icon:BuiltinAiIcon, has:!!bi,
+      full: bi ? `Built-in AI · ${bi.label || bi.model}` : 'Built-in AI (switched off)' }] : []),
+    ...LLM_PROVIDERS.map(p => ({
+      ...p,
+      has: !!(fld[p.id] || (creds.values || {})[`llm_${p.id}`]),
+    })),
+  ];
   const activeOpt = opts.find(o => o.id === active) || null;
 
   const setActive = (id) => {
-    apiFetch('set_active_llm', {provider:id}).then(()=>{
+    apiFetch('set_active_llm', {provider:id}).then((r)=>{
+      if (r && r.error) { bcToast(r.error, 'err'); return; }
       CRED_STORE.set('llm_active', id);
-    });
+    }).catch(()=>bcToast('Network error — the provider was not changed', 'err'));
     setOpen(false);
   };
 
@@ -352,7 +360,7 @@ const ActiveLlmPicker = ({creds, fld}) => {
                 onMouseLeave={e=>{ if(o.has && !sel) e.currentTarget.style.background='transparent'; }}>
                 <o.Icon s={14}/>
                 <span style={{flex:1,fontSize:11.5,fontWeight:500,color:'var(--t1)',letterSpacing:'-0.005em'}}>{o.full}</span>
-                {!o.has && <span style={{fontSize:9,color:'#8a8aa8',fontStyle:'italic'}}>no key</span>}
+                {!o.has && <span style={{fontSize:9,color:'#8a8aa8',fontStyle:'italic'}}>{o.id === 'builtin' ? 'off' : 'no key'}</span>}
                 {sel && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>}
               </button>
             );
@@ -5977,6 +5985,25 @@ const SS_LLM = ({bare} = {}) => {
   };
 
   const active = (creds.values || {}).llm_active || '';
+  // The built-in AI: the site's own key, offered by the administrator.
+  // Re-read on open, since it can be switched on or off at any time.
+  const cat = typeof useLlmCatalog === 'function' ? useLlmCatalog(true) : null;
+  const bi = typeof llmBuiltin === 'function' ? llmBuiltin(cat) : null;
+  const [biBusy, setBiBusy] = React.useState(false);
+  const chooseBuiltin = (on) => {
+    // Off: back to a provider the account has a key for (if any).
+    const next = on ? 'builtin' : ((LLM_PROVIDERS.find(p => (creds.values || {})['llm_' + p.id]) || {}).id || '');
+    if (!next) { bcToast('Add an API key below first, then switch to it', 'err'); return; }
+    setBiBusy(true);
+    apiFetch('set_active_llm', {provider: next})
+      .then(r => {
+        if (!r || r.error) { bcToast((r && r.error) || 'Couldn’t change the provider', 'err'); return; }
+        CRED_STORE.set('llm_active', next);
+        bcToast(on ? 'Using the built-in AI' : 'Using your own key', 'ok');
+      })
+      .catch(() => bcToast('Network error — the provider was not changed', 'err'))
+      .finally(() => setBiBusy(false));
+  };
 
   // Providers collapse to one line each; the key field and model picker
   // open on demand. If nothing has a key yet, the first provider starts
@@ -5995,10 +6022,31 @@ const SS_LLM = ({bare} = {}) => {
   });
 
   const body = (<>
+        {(bi || active === 'builtin') && (
+          <div className="sset-pop-section">
+            <div className="sset-pop-section-label">Built-in AI</div>
+            <div className="llm-row" data-active={active === 'builtin' && bi ? '1' : '0'}>
+              <div className="llm-row-head" style={{cursor:'default'}}>
+                <BuiltinAiIcon s={14}/>
+                <span className="llm-row-name">Built-in AI</span>
+                <span className="llm-row-meta">{bi ? (bi.label || bi.model) : 'Switched off by the administrator'}</span>
+                {active === 'builtin' && bi && <span className="bc-state" data-state="ok"><i aria-hidden="true"/>In use</span>}
+                {bi && (active === 'builtin'
+                  ? <button className="sset-btn" disabled={biBusy} onClick={()=>chooseBuiltin(false)}>Use my own key</button>
+                  : <button className="sset-btn" data-variant="primary" disabled={biBusy} onClick={()=>chooseBuiltin(true)}>Use it</button>)}
+              </div>
+            </div>
+            <div className="sset-form-hint" style={{marginTop:6}}>
+              {bi ? 'No API key needed: your agents reply with the AI this app provides. You can switch to a key of your own at any time.'
+                  : 'The built-in AI isn’t available right now. Your agents use a key of your own below, if you’ve added one.'}
+            </div>
+          </div>
+        )}
+
         <div className="sset-pop-section">
           <div className="sset-pop-section-label">Provider in use</div>
           <ActiveLlmPicker creds={creds} fld={fld}/>
-          <div className="sset-form-hint" style={{marginTop:6}}>All agents reply with this one. Add a key below to make another available.</div>
+          <div className="sset-form-hint" style={{marginTop:6}}>All agents reply with this one. Add a key below to make another available{bi ? ', or choose the built-in AI' : ''}.</div>
         </div>
 
         <div className="sset-pop-section">
@@ -6226,14 +6274,11 @@ const SS_Connections = () => {
   const keyed = LLM_PROVIDERS.filter(p => vals['llm_' + p.id]);
   const activeP = LLM_PROVIDERS.find(p => p.id === active && vals['llm_' + p.id]);
 
-  // Model name for the AI summary (shared catalog, fetched once).
-  const [cat, setCat] = React.useState(typeof LLM_CATALOG !== 'undefined' ? LLM_CATALOG.v : null);
-  React.useEffect(() => {
-    if (typeof LLM_CATALOG === 'undefined') return;
-    let dead = false;
-    LLM_CATALOG.load().then(v => { if (!dead && v) setCat(v); });
-    return () => { dead = true; };
-  }, []);
+  // Model name for the AI summary (shared catalog, re-read on open so the
+  // built-in AI's state is current).
+  const cat = typeof useLlmCatalog === 'function' ? useLlmCatalog(true) : null;
+  const bi = typeof llmBuiltin === 'function' ? llmBuiltin(cat) : null;
+  const onBuiltin = active === 'builtin' && !!bi;
 
   // Open: whatever another page asked for, otherwise the first thing that
   // still needs setting up. Several parts can be open at once.
@@ -6246,7 +6291,7 @@ const SS_Connections = () => {
     if (seeded.current || !creds.loaded) return;
     seeded.current = true;
     if (!tgList.length && !dcList.length) setOpen({telegram: true});
-    else if (!keyed.length) setOpen({ai: true});
+    else if (!keyed.length && active !== 'builtin') setOpen({ai: true});
     // eslint-disable-next-line
   }, [creds.loaded]);
   const tog = (id) => setOpen(o => ({...o, [id]: !o[id]}));
@@ -6263,7 +6308,10 @@ const SS_Connections = () => {
   const modelId = activeP && cat ? ((cat.selected || {})[active] || (cat.defaults || {})[active] || '') : '';
   const modelLbl = modelId && cat && cat.catalog && Array.isArray(cat.catalog[active])
     ? ((cat.catalog[active].find(m => m.id === modelId) || {}).label || modelId) : '';
-  const aiSummary = !keyed.length ? 'Not set up'
+  const aiSummary = onBuiltin ? `Built-in AI, ${bi.label || bi.model}`
+    : active === 'builtin' && !keyed.length ? 'Built-in AI is switched off. Add a key of your own'
+    : active === 'builtin' ? `Built-in AI is switched off, using your ${keyed[0].full} key`
+    : !keyed.length ? (bi ? 'Not set up. Use the built-in AI or add a key' : 'Not set up')
     : activeP ? `${activeP.full}${modelLbl ? `, ${modelLbl}` : ''}`
     : 'Key saved, choose a provider to use';
 
@@ -6300,9 +6348,9 @@ const SS_Connections = () => {
         <div className="cx-sec">
           <div className="cx-cap">AI</div>
           <div className="cx-list">
-            <CxCard icon={activeP ? <activeP.Icon s={14}/> : <CxGlyph name="spark"/>} title="AI provider"
+            <CxCard icon={onBuiltin ? <BuiltinAiIcon s={14}/> : activeP ? <activeP.Icon s={14}/> : <CxGlyph name="spark"/>} title="AI provider"
               open={open.ai} onToggle={() => tog('ai')}
-              state={activeP ? 'on' : keyed.length ? 'warn' : 'off'} summary={aiSummary}>
+              state={onBuiltin || activeP ? 'on' : keyed.length || active === 'builtin' ? 'warn' : 'off'} summary={aiSummary}>
               <SS_LLM bare/>
             </CxCard>
           </div>

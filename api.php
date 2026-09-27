@@ -4548,8 +4548,11 @@ function dm_ai_open_fix(PDO $pdo, int $acc, array $prof): void {
 // The provider, model and key an agent's replies go through. The agent's
 // own model is used when the account has a key for that model's provider;
 // otherwise the account's active provider with its chosen model — so an
-// agent saved with another provider's model never fails outright.
+// agent saved with another provider's model never fails outright. An
+// account that chose the built-in AI always uses it, with its model.
 function dm_ai_llm(PDO $pdo, int $acc, array $agent): ?array {
+    $r = llm_resolve($pdo, $acc);
+    if ($r && $r['builtin']) return ['provider' => $r['provider'], 'model' => $r['model'], 'key' => $r['key'], 'builtin' => true];
     $keyMap = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
     $k = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
     $keys = [];
@@ -9665,12 +9668,41 @@ function bot_conv_parse(string $convId): ?array {
     if (!preg_match('/^(telegram|discord)_(-?\d{1,24})$/', $convId, $m)) return null;
     return ['platform' => $m[1], 'chat' => $m[2]];
 }
+// The bot token saved in Settings. The app keeps the one in use under
+// tg_bot_token / dc_bot_token, and every saved account in the credential
+// 'platform_accounts'; the active bot account there counts too, so a token
+// that was saved but not yet copied to the legacy key isn't missed.
 function bot_token(PDO $pdo, int $acc, string $platform): string {
     try {
         $q = $pdo->prepare("SELECT value FROM bc_credentials WHERE account_id=? AND `key`=? LIMIT 1");
         $q->execute([$acc, $platform === 'discord' ? 'dc_bot_token' : 'tg_bot_token']);
-        return trim((string)($q->fetchColumn() ?: ''));
+        $tok = trim((string)($q->fetchColumn() ?: ''));
+        if ($tok !== '') return $tok;
+        $q = $pdo->prepare("SELECT meta FROM bc_credentials WHERE account_id=? AND `key`='platform_accounts' LIMIT 1");
+        $q->execute([$acc]);
+        $m = json_decode((string)($q->fetchColumn() ?: ''), true);
+        if (!is_array($m)) return '';
+        $active = (string)($m[$platform === 'discord' ? 'activeDc' : 'activeTg'] ?? '');
+        foreach ((array)($m[$platform] ?? []) as $a) {
+            if (!is_array($a) || $active === '' || (string)($a['id'] ?? '') !== $active) continue;
+            if ($platform === 'telegram' && ($a['mode'] ?? 'bot') !== 'bot') return '';   // a user account, not a bot
+            return trim((string)($a['token'] ?? ''));
+        }
+        return '';
     } catch (Throwable $e) { return ''; }
+}
+// A bot token was just saved: an old "no token" error no longer holds, and
+// the relay tries again now rather than after its back-off.
+function bot_relay_token_saved(PDO $pdo, int $acc, ?string $platform = null): void {
+    try {
+        bot_relay_schema($pdo);
+        foreach ($platform ? [$platform] : ['telegram', 'discord'] as $pl) {
+            if (bot_token($pdo, $acc, $pl) === '') continue;
+            $pdo->prepare("UPDATE bc_bot_relay SET last_error=NULL, error_at=NULL, fails=0, next_at=NOW()
+                            WHERE account_id=? AND platform=? AND (last_error='No bot token saved.' OR last_error LIKE '%rejected the bot token%')")
+                ->execute([$acc, $pl]);
+        }
+    } catch (Throwable $e) {}
 }
 function bot_tok_hash(string $token): string { return $token === '' ? '' : substr(hash('sha256', 'bc-bot|' . $token), 0, 16); }
 function bot_relay_row(PDO $pdo, int $acc, string $platform): ?array {
@@ -14059,6 +14091,11 @@ switch ($action) {
                     ->execute([$ACCOUNT_ID, $body['key'], $body['value'] ?? '', isset($body['meta']) ? json_encode($body['meta']) : null]);
             }
         }
+        // A bot token saved (or the saved accounts changed): clear a stale
+        // "No bot token saved." so Settings and the admin console are right.
+        if (in_array($body['key'], ['tg_bot_token', 'dc_bot_token', 'platform_accounts'], true)) {
+            bot_relay_token_saved($pdo, (int)$ACCOUNT_ID, $body['key'] === 'tg_bot_token' ? 'telegram' : ($body['key'] === 'dc_bot_token' ? 'discord' : null));
+        }
         // Auto-promote the first LLM key entered to "active" so the user
         // doesn't have to also click the picker for things to work. Scoped
         // to THIS account so promoting one operator's key doesn't leak.
@@ -14086,9 +14123,11 @@ switch ($action) {
         ok();
 
     case 'set_active_llm':
-        // Accepted values: gemini | openai | claude
+        // Accepted values: gemini | openai | claude | builtin (the site's
+        // own AI, only while the administrator has it switched on)
         $which = strtolower($body['provider'] ?? '');
-        if (!in_array($which, ['gemini','openai','claude'], true)) err('provider must be gemini|openai|claude');
+        if (!in_array($which, ['gemini','openai','claude','builtin'], true)) err('provider must be gemini|openai|claude|builtin');
+        if ($which === 'builtin' && !llm_builtin()) err('The built-in AI isn’t available right now. Add a key of your own instead.');
         $hasComposite = (bool)$pdo->query("SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='bc_credentials' AND INDEX_NAME='uniq_acc_key'")->fetchColumn();
         if ($hasComposite) {
             $pdo->prepare("INSERT INTO bc_credentials (account_id, `key`, value) VALUES (?, 'llm_active', ?)
@@ -14144,6 +14183,8 @@ switch ($action) {
                 'openai' => llm_default_model('openai'),
                 'claude' => llm_default_model('claude'),
             ],
+            // The site's own AI (admin.php): whether it can be chosen, and its model.
+            'builtin' => llm_builtin_public(),
         ]);
 
     // ── MEMORY (per-conversation JSON) ───────────────────────
@@ -16638,21 +16679,13 @@ BGCSS;
 
         // ── BRANCH B: fresh natural-language command — call the LLM ──
         // Resolve provider + key (mirror of ai_reply path but minimal).
-        $providerRow = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $providerRow->execute([$ACCOUNT_ID]);
-        $provider = (string)($providerRow->fetchColumn() ?: 'gemini');
         $keyMap = ['gemini'=>'llm_gemini','openai'=>'llm_openai','claude'=>'llm_claude'];
         $kRow = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kRow->execute([$keyMap[$provider] ?? 'llm_gemini', $ACCOUNT_ID]);
-        $apiKey = (string)$kRow->fetchColumn();
-        if (!$apiKey) {
-            foreach ($keyMap as $p=>$kk) {
-                $kRow->execute([$kk, $ACCOUNT_ID]);
-                $v = (string)$kRow->fetchColumn();
-                if ($v) { $provider = $p; $apiKey = $v; break; }
-            }
-        }
-        if (!$apiKey) err('no LLM API key configured — set one in Settings → LLM Keys');
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR1 = llm_resolve($pdo, $ACCOUNT_ID);
+        $provider = (string)($llmR1['provider'] ?? 'gemini');
+        $apiKey = (string)($llmR1['key'] ?? '');
+        if (!$apiKey) err('no AI set up — add an API key, or choose the built-in AI, in Settings → Connections → AI provider');
 
         // Build the context pack — recent contacts/invoices/agents and
         // dashboard layout. Cached briefly per session so repeated turns
@@ -17072,9 +17105,9 @@ GHOSTTXT;
 
         $reply = '';
         try {
-            if ($provider === 'gemini')      $reply = call_gemini($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist);
-            elseif ($provider === 'openai')  $reply = call_openai($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist);
-            elseif ($provider === 'claude')  $reply = call_claude($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+            if ($provider === 'gemini')      $reply = call_gemini($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $apiKey), $sys, $hist);
+            elseif ($provider === 'openai')  $reply = call_openai($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $apiKey), $sys, $hist);
+            elseif ($provider === 'claude')  $reply = call_claude($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $apiKey), $sys, $hist);
             else err('Unknown LLM provider: '.$provider);
         } catch (Throwable $e) {
             err('LLM call failed: ' . $e->getMessage());
@@ -17415,9 +17448,9 @@ GHOSTTXT;
                 // answer to come back as a JSON blob (e.g. {"answer": "..."})
                 // — which is exactly what used to leak into the operator's
                 // chat verbatim. Claude never forced JSON here to begin with.
-                if ($provider === 'gemini')      $answer = call_gemini($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $ansSys, $ansHist, false);
-                elseif ($provider === 'openai')  $answer = call_openai($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $ansSys, $ansHist, false);
-                elseif ($provider === 'claude')  $answer = call_claude($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $ansSys, $ansHist);
+                if ($provider === 'gemini')      $answer = call_gemini($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $apiKey), $ansSys, $ansHist, false);
+                elseif ($provider === 'openai')  $answer = call_openai($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $apiKey), $ansSys, $ansHist, false);
+                elseif ($provider === 'claude')  $answer = call_claude($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $apiKey), $ansSys, $ansHist);
 
                 $answer = trim(strip_tags(ghost_plain_text((string)$answer)));
                 // The answer pass replaces any placeholder speak from the
@@ -17793,14 +17826,12 @@ GHOSTTXT;
         if (!$tx) ok(['failed' => 1, 'reason' => 'no messages']);
         $cq = $pdo->prepare("SELECT agent_id FROM bc_conversations WHERE id=? AND account_id=? LIMIT 1");
         $cq->execute([$convId, $ACCOUNT_ID]);
-        $pr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $pr->execute([$ACCOUNT_ID]);
-        $prov = (string)($pr->fetchColumn() ?: 'gemini');
         $km = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
         $kr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kr->execute([$km[$prov] ?? 'llm_gemini', $ACCOUNT_ID]);
-        $key = (string)$kr->fetchColumn();
-        if (!$key) { foreach ($km as $pv => $kk) { $kr->execute([$kk, $ACCOUNT_ID]); $v = (string)$kr->fetchColumn(); if ($v) { $prov = $pv; $key = $v; break; } } }
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR2 = llm_resolve($pdo, $ACCOUNT_ID);
+        $prov = (string)($llmR2['provider'] ?? 'gemini');
+        $key = (string)($llmR2['key'] ?? '');
         if (!$key) ok(['failed' => 1, 'reason' => 'no LLM key configured']);
         $sys  = "You read a chat between a SHOP and a CUSTOMER. The customer is buying " . ($items ? implode(', ', $items) : 'more than one of a product') . ". Each comes with a licence key / serial" . ($anyLifetime && !$anyTerm ? '' : ($anyLifetime ? ' (some run out, some never do)' : ' that runs out')) . ".\n";
         $sys .= "It can be delivered two ways:\n";
@@ -17813,9 +17844,9 @@ GHOSTTXT;
         $hist = [['role' => 'user', 'content' => "CHAT, oldest first:\n" . implode("\n", $tx)]];
         $out = '';
         try {
-            if ($prov === 'gemini')     $out = call_gemini($key, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist, true);
-            elseif ($prov === 'openai') $out = call_openai($key, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist, true);
-            elseif ($prov === 'claude') $out = call_claude($key, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+            if ($prov === 'gemini')     $out = call_gemini($key, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $key), $sys, $hist, true);
+            elseif ($prov === 'openai') $out = call_openai($key, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $key), $sys, $hist, true);
+            elseif ($prov === 'claude') $out = call_claude($key, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $key), $sys, $hist);
         } catch (\Throwable $e) {
             ok(['failed' => 1, 'reason' => 'the model could not be reached']);
         }
@@ -17922,14 +17953,12 @@ GHOSTTXT;
             $ag0 = [];
             if ($aid0) { $aq0 = $pdo->prepare("SELECT * FROM bc_agents WHERE id=? AND account_id=? LIMIT 1"); $aq0->execute([$aid0, $ACCOUNT_ID]); $ag0 = $aq0->fetch() ?: []; }
             if (!$ag0) { $aq0 = $pdo->prepare("SELECT * FROM bc_agents WHERE account_id=? AND active=1 ORDER BY id ASC LIMIT 1"); $aq0->execute([$ACCOUNT_ID]); $ag0 = $aq0->fetch() ?: []; }
-            $pr0 = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-            $pr0->execute([$ACCOUNT_ID]);
-            $prov0 = (string)($pr0->fetchColumn() ?: 'gemini');
             $km0 = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
             $kr0 = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-            $kr0->execute([$km0[$prov0] ?? 'llm_gemini', $ACCOUNT_ID]);
-            $key0 = (string)$kr0->fetchColumn();
-            if (!$key0) { foreach ($km0 as $pv => $kk) { $kr0->execute([$kk, $ACCOUNT_ID]); $v0 = (string)$kr0->fetchColumn(); if ($v0) { $prov0 = $pv; $key0 = $v0; break; } } }
+            // The account's own key, or the built-in AI when it chose that.
+            $llmR3 = llm_resolve($pdo, $ACCOUNT_ID);
+            $prov0 = (string)($llmR3['provider'] ?? 'gemini');
+            $key0 = (string)($llmR3['key'] ?? '');
             if (!$key0) ok(['text' => '', 'reason' => 'no LLM key configured']);
             $lang0 = preg_replace('/[^a-zA-Z\-]/', '', (string)($body['lang'] ?? 'en')) ?: 'en';
             $emo0 = (int)($body['emoji'] ?? 1) === 1;
@@ -18006,9 +18035,9 @@ GHOSTTXT;
             $hist0 = [['role' => 'user', 'content' => 'Write that one message now.']];
             $text0 = '';
             try {
-                if ($prov0 === 'gemini')     $text0 = call_gemini($key0, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys0, $hist0, false);
-                elseif ($prov0 === 'openai') $text0 = call_openai($key0, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys0, $hist0, false);
-                elseif ($prov0 === 'claude') $text0 = call_claude($key0, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys0, $hist0);
+                if ($prov0 === 'gemini')     $text0 = call_gemini($key0, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $key0), $sys0, $hist0, false);
+                elseif ($prov0 === 'openai') $text0 = call_openai($key0, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $key0), $sys0, $hist0, false);
+                elseif ($prov0 === 'claude') $text0 = call_claude($key0, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $key0), $sys0, $hist0);
             } catch (Throwable $e) {
                 ok(['text' => '', 'reason' => 'the model could not be reached']);
             }
@@ -18118,20 +18147,12 @@ GHOSTTXT;
             $agent = $aq2->fetch() ?: [];
         }
 
-        $pr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $pr->execute([$ACCOUNT_ID]);
-        $provider = (string)($pr->fetchColumn() ?: 'gemini');
         $keyMap = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
         $kr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kr->execute([$keyMap[$provider] ?? 'llm_gemini', $ACCOUNT_ID]);
-        $apiKey = (string)$kr->fetchColumn();
-        if (!$apiKey) {
-            foreach ($keyMap as $pv => $kk) {
-                $kr->execute([$kk, $ACCOUNT_ID]);
-                $v = (string)$kr->fetchColumn();
-                if ($v) { $provider = $pv; $apiKey = $v; break; }
-            }
-        }
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR4 = llm_resolve($pdo, $ACCOUNT_ID);
+        $provider = (string)($llmR4['provider'] ?? 'gemini');
+        $apiKey = (string)($llmR4['key'] ?? '');
         if (!$apiKey) ok(['text' => '', 'reason' => 'no LLM key configured']);
 
         $amtLabel = ($amountCoin !== '' && $coin !== '') ? ($amountCoin . ' ' . $coin)
@@ -18161,9 +18182,9 @@ GHOSTTXT;
             $hist = [['role' => 'user', 'content' => 'Write that one message now.']];
             $text = '';
             try {
-                if ($provider === 'gemini')     $text = call_gemini($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist, false);
-                elseif ($provider === 'openai') $text = call_openai($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist, false);
-                elseif ($provider === 'claude') $text = call_claude($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+                if ($provider === 'gemini')     $text = call_gemini($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $apiKey), $sys, $hist, false);
+                elseif ($provider === 'openai') $text = call_openai($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $apiKey), $sys, $hist, false);
+                elseif ($provider === 'claude') $text = call_claude($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $apiKey), $sys, $hist);
             } catch (Throwable $e) {
                 ok(['text' => '', 'reason' => 'the model could not be reached']);
             }
@@ -18241,9 +18262,9 @@ GHOSTTXT;
         $hist = [['role' => 'user', 'content' => 'Write that one message now.']];
         $text = '';
         try {
-            if ($provider === 'gemini')     $text = call_gemini($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist, false);
-            elseif ($provider === 'openai') $text = call_openai($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist, false);
-            elseif ($provider === 'claude') $text = call_claude($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+            if ($provider === 'gemini')     $text = call_gemini($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $apiKey), $sys, $hist, false);
+            elseif ($provider === 'openai') $text = call_openai($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $apiKey), $sys, $hist, false);
+            elseif ($provider === 'claude') $text = call_claude($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $apiKey), $sys, $hist);
         } catch (Throwable $e) {
             error_log('[compose_payment_line] provider threw: ' . $e->getMessage());
             ok(['text' => '', 'reason' => 'the model could not be reached']);
@@ -18326,20 +18347,12 @@ GHOSTTXT;
         $hq->execute([$convId, $ACCOUNT_ID]);
         $recent = array_reverse($hq->fetchAll());
 
-        $pr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $pr->execute([$ACCOUNT_ID]);
-        $provider = (string)($pr->fetchColumn() ?: 'gemini');
         $keyMap = ['gemini'=>'llm_gemini','openai'=>'llm_openai','claude'=>'llm_claude'];
         $kr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kr->execute([$keyMap[$provider] ?? 'llm_gemini', $ACCOUNT_ID]);
-        $apiKey = (string)$kr->fetchColumn();
-        if (!$apiKey) {
-            foreach ($keyMap as $pv => $kk) {
-                $kr->execute([$kk, $ACCOUNT_ID]);
-                $v = (string)$kr->fetchColumn();
-                if ($v) { $provider = $pv; $apiKey = $v; break; }
-            }
-        }
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR5 = llm_resolve($pdo, $ACCOUNT_ID);
+        $provider = (string)($llmR5['provider'] ?? 'gemini');
+        $apiKey = (string)($llmR5['key'] ?? '');
         if (!$apiKey) ok(['text' => '', 'reason' => 'no LLM key configured']);
 
         $who = trim((string)($conv['name'] ?? '')) ?: trim((string)($conv['handle'] ?? ''));
@@ -18380,9 +18393,9 @@ GHOSTTXT;
             // JSON envelope (e.g. {"answer": "..."}) that would otherwise
             // have gone out to the customer verbatim, sentinel-strip and
             // quote-trim below notwithstanding.
-            if ($provider === 'gemini')     $text = call_gemini($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist, false);
-            elseif ($provider === 'openai') $text = call_openai($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist, false);
-            elseif ($provider === 'claude') $text = call_claude($apiKey, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+            if ($provider === 'gemini')     $text = call_gemini($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $apiKey), $sys, $hist, false);
+            elseif ($provider === 'openai') $text = call_openai($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $apiKey), $sys, $hist, false);
+            elseif ($provider === 'claude') $text = call_claude($apiKey, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $apiKey), $sys, $hist);
         } catch (Throwable $e) {
             error_log('[sched_compose] provider threw: ' . $e->getMessage());
             ok(['text' => '', 'reason' => 'the model could not be reached']);
@@ -19297,6 +19310,9 @@ GHOSTTXT;
                         bot_relay_enable($pdo, $me, $pl, $token, ['bot_id' => (string)($st['bot_id'] ?? ''), 'bot_name' => (string)($st['bot_name'] ?? ''), 'username' => ltrim((string)($st['username'] ?? ''), '@')]);
                 }
                 $pdo->prepare("UPDATE bc_bot_relay SET host_at=NOW() WHERE account_id=? AND platform=?")->execute([$me, $pl]);
+                // The desktop app is receiving for this bot, so whatever the
+                // server last failed at no longer applies.
+                bot_relay_error($pdo, $me, $pl, null);
             } else {
                 $pdo->prepare("UPDATE bc_bot_relay SET host_at=NULL WHERE account_id=? AND platform=? AND host_at IS NOT NULL")->execute([$me, $pl]);
             }
@@ -20082,21 +20098,13 @@ function bc_act_ai_reply(PDO $pdo, int $ACCOUNT_ID, array $body): void {
         }
 
         // 3. Active LLM provider + key — per account.
-        $providerRow = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $providerRow->execute([$ACCOUNT_ID]);
-        $provider = (string)($providerRow->fetchColumn() ?: 'gemini');
         $keyMap = ['gemini'=>'llm_gemini','openai'=>'llm_openai','claude'=>'llm_claude'];
         $kRow = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kRow->execute([$keyMap[$provider] ?? 'llm_gemini', $ACCOUNT_ID]);
-        $apiKey = (string)$kRow->fetchColumn();
-        if (!$apiKey) {
-            foreach ($keyMap as $p=>$kk) {
-                $kRow->execute([$kk, $ACCOUNT_ID]);
-                $v = (string)$kRow->fetchColumn();
-                if ($v) { $provider = $p; $apiKey = $v; break; }
-            }
-        }
-        if (!$apiKey) err('no LLM API key configured — set one in Settings → LLM Keys');
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR6 = llm_resolve($pdo, $ACCOUNT_ID);
+        $provider = (string)($llmR6['provider'] ?? 'gemini');
+        $apiKey = (string)($llmR6['key'] ?? '');
+        if (!$apiKey) err('no AI set up — add an API key, or choose the built-in AI, in Settings → Connections → AI provider');
 
         // 4. Recent thread + memory file
         // 80 rows: replies go out as several short bubbles, so 50 rows was
@@ -21807,34 +21815,38 @@ function bc_act_ai_reply(PDO $pdo, int $ACCOUNT_ID, array $body): void {
         // limited Gemini key would silently kill every conversation.
         $reply = '';
         $rawJson = '';
-        $callProvider = function(string $prov, string $key) use ($agent, $sys, $hist) {
+        $callProvider = function(string $prov, string $key) use ($agent, $sys, $hist, $pdo, $ACCOUNT_ID) {
             if ($prov === 'gemini') {
-                return call_gemini($key, $agent['model'] ?: llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist);
+                return call_gemini($key, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $key, (string)($agent['model'] ?? '')), $sys, $hist);
             } elseif ($prov === 'openai') {
-                return call_openai($key, $agent['model'] ?: llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist);
+                return call_openai($key, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $key, (string)($agent['model'] ?? '')), $sys, $hist);
             } elseif ($prov === 'claude') {
-                return call_claude($key, $agent['model'] ?: llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+                return call_claude($key, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $key, (string)($agent['model'] ?? '')), $sys, $hist);
             }
             throw new RuntimeException("Unknown provider: $prov");
         };
 
         // Build the call list: active provider first, then any others that
         // have a key configured (in case the active one fails).
+        // (On the built-in AI, the account's own keys are the fallback —
+        // never the other way round: a failing own key doesn't move the
+        // account onto the site owner's key.)
         $callOrder = [[$provider, $apiKey]];
         foreach ($keyMap as $p => $kk) {
-            if ($p === $provider) continue;
             $kRow->execute([$kk, $ACCOUNT_ID]);
             $v = (string)$kRow->fetchColumn();
-            if ($v) $callOrder[] = [$p, $v];
+            if ($v && $v !== $apiKey) $callOrder[] = [$p, $v];
         }
 
         $lastErr = null;
         $usedProvider = $provider;
+        $usedKey = $apiKey;
         foreach ($callOrder as [$p, $k]) {
             try {
                 $rawJson = $callProvider($p, $k);
                 if (trim((string)$rawJson) !== '') {
                     $usedProvider = $p;
+                    $usedKey = $k;
                     $lastErr = null;
                     break;
                 }
@@ -21849,6 +21861,7 @@ function bc_act_ai_reply(PDO $pdo, int $ACCOUNT_ID, array $body): void {
             err('LLM call failed: ' . $lastErr);
         }
         $provider = $usedProvider;
+        $apiKey = $usedKey;
 
         // The LLM round-trip may have outlived the MySQL wait_timeout (shared
         // hosts often set this to 28s; Gemini regularly takes 35–60s). Ping
@@ -22493,10 +22506,10 @@ function bc_act_ai_reply(PDO $pdo, int $ACCOUNT_ID, array $body): void {
             // _stall_retry flag prevents infinite loops if the second
             // attempt also stalls (we ship that one regardless).
             $stallSys = $sys . "\n\n── REPLY REJECTED — REWRITE NOW ──\n" . $stallReason . "\nThis is your last chance. Re-output the FULL JSON object. Make the reply text actively advance the funnel. Do NOT just apologise and re-send the same line.\n";
-            $retryStallProvider = function(string $prov, string $key) use ($agent, $stallSys, $hist) {
-                if ($prov === 'gemini')   return call_gemini($key, $agent['model'] ?: llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $stallSys, $hist);
-                if ($prov === 'openai')   return call_openai($key, $agent['model'] ?: llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $stallSys, $hist);
-                if ($prov === 'claude')   return call_claude($key, $agent['model'] ?: llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $stallSys, $hist);
+            $retryStallProvider = function(string $prov, string $key) use ($agent, $stallSys, $hist, $pdo, $ACCOUNT_ID) {
+                if ($prov === 'gemini')   return call_gemini($key, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $key, (string)($agent['model'] ?? '')), $stallSys, $hist);
+                if ($prov === 'openai')   return call_openai($key, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $key, (string)($agent['model'] ?? '')), $stallSys, $hist);
+                if ($prov === 'claude')   return call_claude($key, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $key, (string)($agent['model'] ?? '')), $stallSys, $hist);
                 throw new RuntimeException("Unknown provider: $prov");
             };
             try {
@@ -23851,14 +23864,12 @@ function bc_act_classify_order(PDO $pdo, int $ACCOUNT_ID, array $body): void {
             }
         } catch (\Throwable $e) { /* handled below */ }
         if (!$tx) ok(['failed' => 1, 'reason' => 'no messages']);
-        $pr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $pr->execute([$ACCOUNT_ID]);
-        $prov = (string)($pr->fetchColumn() ?: 'gemini');
         $km = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
         $kr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kr->execute([$km[$prov] ?? 'llm_gemini', $ACCOUNT_ID]);
-        $key = (string)$kr->fetchColumn();
-        if (!$key) { foreach ($km as $pv => $kk) { $kr->execute([$kk, $ACCOUNT_ID]); $v = (string)$kr->fetchColumn(); if ($v) { $prov = $pv; $key = $v; break; } } }
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR7 = llm_resolve($pdo, $ACCOUNT_ID);
+        $prov = (string)($llmR7['provider'] ?? 'gemini');
+        $key = (string)($llmR7['key'] ?? '');
         if (!$key) ok(['failed' => 1, 'reason' => 'no LLM key configured']);
         $sys  = "You read a chat between a SHOP and a CUSTOMER. The shop is about to send a payment request for these lines:\n" . implode("\n", $lineTxt) . "\n\n";
         $sys .= "For EACH line, work out how many of that product the CUSTOMER wants in the order they are placing NOW.\n";
@@ -23881,9 +23892,9 @@ function bc_act_classify_order(PDO $pdo, int $ACCOUNT_ID, array $body): void {
         $hist = [['role' => 'user', 'content' => "CHAT, oldest first:\n" . implode("\n", $tx)]];
         $out = '';
         try {
-            if ($prov === 'gemini')     $out = call_gemini($key, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist, true);
-            elseif ($prov === 'openai') $out = call_openai($key, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist, true);
-            elseif ($prov === 'claude') $out = call_claude($key, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+            if ($prov === 'gemini')     $out = call_gemini($key, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $key), $sys, $hist, true);
+            elseif ($prov === 'openai') $out = call_openai($key, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $key), $sys, $hist, true);
+            elseif ($prov === 'claude') $out = call_claude($key, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $key), $sys, $hist);
         } catch (\Throwable $e) {
             ok(['failed' => 1, 'reason' => 'the model could not be reached']);
         }
@@ -23932,14 +23943,12 @@ function bc_act_compose_agent_question(PDO $pdo, int $ACCOUNT_ID, array $body): 
         $ag = [];
         if ($aid) { $aq = $pdo->prepare("SELECT * FROM bc_agents WHERE id=? AND account_id=? LIMIT 1"); $aq->execute([$aid, $ACCOUNT_ID]); $ag = $aq->fetch() ?: []; }
         if (!$ag) { $aq = $pdo->prepare("SELECT * FROM bc_agents WHERE account_id=? AND active=1 ORDER BY id ASC LIMIT 1"); $aq->execute([$ACCOUNT_ID]); $ag = $aq->fetch() ?: []; }
-        $pr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $pr->execute([$ACCOUNT_ID]);
-        $prov = (string)($pr->fetchColumn() ?: 'gemini');
         $km = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
         $kr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kr->execute([$km[$prov] ?? 'llm_gemini', $ACCOUNT_ID]);
-        $key = (string)$kr->fetchColumn();
-        if (!$key) { foreach ($km as $pv => $kk) { $kr->execute([$kk, $ACCOUNT_ID]); $v = (string)$kr->fetchColumn(); if ($v) { $prov = $pv; $key = $v; break; } } }
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR8 = llm_resolve($pdo, $ACCOUNT_ID);
+        $prov = (string)($llmR8['provider'] ?? 'gemini');
+        $key = (string)($llmR8['key'] ?? '');
         if (!$key) ok(['text' => '', 'reason' => 'no LLM key configured']);
 
         $clean = fn($v, $n = 80) => mb_substr(trim(preg_replace('/[\r\n\[\]]+/', ' ', (string)$v)), 0, $n);
@@ -23983,9 +23992,9 @@ function bc_act_compose_agent_question(PDO $pdo, int $ACCOUNT_ID, array $body): 
         $hist = [['role' => 'user', 'content' => 'Write that one message now.']];
         $text = '';
         try {
-            if ($prov === 'gemini')     $text = call_gemini($key, llm_account_model($pdo, $ACCOUNT_ID, 'gemini'), $sys, $hist, false);
-            elseif ($prov === 'openai') $text = call_openai($key, llm_account_model($pdo, $ACCOUNT_ID, 'openai'), $sys, $hist, false);
-            elseif ($prov === 'claude') $text = call_claude($key, llm_account_model($pdo, $ACCOUNT_ID, 'claude'), $sys, $hist);
+            if ($prov === 'gemini')     $text = call_gemini($key, llm_model_for($pdo, $ACCOUNT_ID, 'gemini', $key), $sys, $hist, false);
+            elseif ($prov === 'openai') $text = call_openai($key, llm_model_for($pdo, $ACCOUNT_ID, 'openai', $key), $sys, $hist, false);
+            elseif ($prov === 'claude') $text = call_claude($key, llm_model_for($pdo, $ACCOUNT_ID, 'claude', $key), $sys, $hist);
         } catch (Throwable $e) {
             ok(['text' => '', 'reason' => 'the model could not be reached']);
         }
@@ -28741,14 +28750,12 @@ function persona_line(PDO $pdo, int $accountId, string $convId, array $spec): st
         if ($aid) { $aq = $pdo->prepare("SELECT * FROM bc_agents WHERE id=? AND account_id=? LIMIT 1"); $aq->execute([$aid, $accountId]); $ag = $aq->fetch() ?: []; }
         if (!$ag) { $aq = $pdo->prepare("SELECT * FROM bc_agents WHERE account_id=? AND active=1 ORDER BY id ASC LIMIT 1"); $aq->execute([$accountId]); $ag = $aq->fetch() ?: []; }
 
-        $pr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
-        $pr->execute([$accountId]);
-        $prov = (string)($pr->fetchColumn() ?: 'gemini');
         $km = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
         $kr = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
-        $kr->execute([$km[$prov] ?? 'llm_gemini', $accountId]);
-        $key = (string)$kr->fetchColumn();
-        if (!$key) { foreach ($km as $pv => $kk) { $kr->execute([$kk, $accountId]); $v = (string)$kr->fetchColumn(); if ($v) { $prov = $pv; $key = $v; break; } } }
+        // The account's own key, or the built-in AI when it chose that.
+        $llmR9 = llm_resolve($pdo, $accountId);
+        $prov = (string)($llmR9['provider'] ?? 'gemini');
+        $key = (string)($llmR9['key'] ?? '');
         if (!$key) return '';
 
         $lang = preg_replace('/[^a-zA-Z\-]/', '', (string)($spec['lang'] ?? ''));
@@ -28824,9 +28831,9 @@ function persona_line(PDO $pdo, int $accountId, string $convId, array $spec): st
 
         $hist = [['role' => 'user', 'content' => 'Write that message now.']];
         $text = '';
-        if ($prov === 'gemini')     $text = call_gemini($key, llm_account_model($pdo, $accountId, 'gemini'), $sys, $hist, false);
-        elseif ($prov === 'openai') $text = call_openai($key, llm_account_model($pdo, $accountId, 'openai'), $sys, $hist, false);
-        elseif ($prov === 'claude') $text = call_claude($key, llm_account_model($pdo, $accountId, 'claude'), $sys, $hist);
+        if ($prov === 'gemini')     $text = call_gemini($key, llm_model_for($pdo, $accountId, 'gemini', $key), $sys, $hist, false);
+        elseif ($prov === 'openai') $text = call_openai($key, llm_model_for($pdo, $accountId, 'openai', $key), $sys, $hist, false);
+        elseif ($prov === 'claude') $text = call_claude($key, llm_model_for($pdo, $accountId, 'claude', $key), $sys, $hist);
         $text = ghost_plain_text((string)$text);
         $text = trim(preg_replace('/\[\[(?!SPLIT\]\])[^\]]*\]\]/', '', (string)$text));
         $text = trim($text, "\"' \n\r\t");
@@ -30652,6 +30659,78 @@ function llm_account_model(PDO $pdo, int $accountId, string $provider): string {
     return llm_default_model($provider);
 }
 
+// ── BUILT-IN AI ──────────────────────────────────────────────────
+// The site owner can offer an AI key of their own (admin.php → Settings →
+// Built-in AI). An account chooses it in Connections → AI provider, which
+// saves llm_active = 'builtin'; its AI calls then go through the owner's
+// key and model instead of a key of its own, and each one is recorded in
+// bc_llm_usage with builtin = 1, so admin.php prices them apart from calls
+// made on accounts' own keys. The key never leaves the server: the app is
+// only told whether the built-in AI is on and which model it runs.
+function llm_builtin(): ?array {
+    static $memo = null, $at = 0;
+    if ($memo !== null && time() - $at < 30) return $memo ?: null;   // re-read often: workers run for a while
+    global $pdo;
+    $c = [];
+    try {
+        if ($pdo) {
+            $q = $pdo->query("SELECT k, v FROM bc_admin_settings WHERE k IN ('builtin_llm_on','builtin_llm_provider','builtin_llm_model','builtin_llm_key')");
+            if ($q) foreach ($q->fetchAll(PDO::FETCH_NUM) as $r) $c[(string)$r[0]] = trim((string)$r[1]);
+        }
+    } catch (Throwable $e) {}                                         // table not made yet: no built-in AI
+    $at = time();
+    $pv = strtolower($c['builtin_llm_provider'] ?? '');
+    if (($c['builtin_llm_on'] ?? '') !== '1' || ($c['builtin_llm_key'] ?? '') === '' || !in_array($pv, ['gemini', 'openai', 'claude'], true)) {
+        $memo = [];
+        return null;
+    }
+    $model = (string)($c['builtin_llm_model'] ?? '');
+    if (!preg_match('/^[A-Za-z0-9._:\-\/]{2,80}$/', $model)) $model = llm_default_model($pv);
+    return $memo = ['provider' => $pv, 'model' => $model, 'key' => (string)$c['builtin_llm_key']];
+}
+function llm_is_builtin_key(string $key): bool {
+    $b = llm_builtin();
+    return $b !== null && $key !== '' && hash_equals($b['key'], $key);
+}
+// What the app may know about it: on or off, and the model (never the key).
+function llm_builtin_public(): array {
+    $b = llm_builtin();
+    if (!$b) return ['available' => false, 'provider' => '', 'model' => '', 'label' => ''];
+    $label = $b['model'];
+    foreach (llm_model_catalog()[$b['provider']] ?? [] as $m) { if ($m['id'] === $b['model']) { $label = $m['label']; break; } }
+    return ['available' => true, 'provider' => $b['provider'], 'model' => $b['model'], 'label' => $label];
+}
+// The provider and key an account's AI calls go through:
+// ['provider', 'key', 'model', 'builtin' => bool], or null when it has
+// neither a key of its own nor the built-in AI. The built-in AI is used
+// only when the account chose it; an account that chose it while it is
+// switched off falls back to a key of its own, if it has one.
+function llm_resolve(PDO $pdo, int $acc): ?array {
+    $a = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`='llm_active' AND account_id=?");
+    $a->execute([$acc]);
+    $active = (string)($a->fetchColumn() ?: '');
+    if ($active === 'builtin' && ($b = llm_builtin())) {
+        return ['provider' => $b['provider'], 'key' => $b['key'], 'model' => $b['model'], 'builtin' => true];
+    }
+    $keyMap = ['gemini' => 'llm_gemini', 'openai' => 'llm_openai', 'claude' => 'llm_claude'];
+    $k = $pdo->prepare("SELECT value FROM bc_credentials WHERE `key`=? AND account_id=?");
+    $order = isset($keyMap[$active]) ? array_merge([$active], array_diff(array_keys($keyMap), [$active])) : array_keys($keyMap);
+    foreach ($order as $pv) {
+        $k->execute([$keyMap[$pv], $acc]);
+        $v = (string)$k->fetchColumn();
+        if ($v !== '') return ['provider' => $pv, 'key' => $v, 'model' => llm_account_model($pdo, $acc, $pv), 'builtin' => false];
+    }
+    return null;
+}
+// The model a call on $key should use: the built-in AI's own model when
+// $key is the built-in key (an agent's model choice never moves the site
+// owner's key onto another model), otherwise the agent's model if it has
+// one, else the account's chosen model for that provider.
+function llm_model_for(PDO $pdo, int $acc, string $provider, string $key, string $want = ''): string {
+    if (llm_is_builtin_key($key)) return llm_builtin()['model'];
+    return $want !== '' ? $want : llm_account_model($pdo, $acc, $provider);
+}
+
 function _sanitise_history(array $hist, bool $strictAlternate = false): array {
     $clean = [];
     foreach ($hist as $m) {
@@ -30720,6 +30799,12 @@ function http_post_json(string $url, array $headers, array $body, int $timeout =
 function bc_llm_key_owner(string $apiKey): ?int {
     static $memo = [];
     if ($apiKey === '') return null;
+    // The built-in AI's key belongs to the site: the call is the account the
+    // running code is working for (or the signed-in one).
+    if (llm_is_builtin_key($apiKey)) {
+        $ctx = isset($GLOBALS['BC_LLM_ACCT']) ? (int)$GLOBALS['BC_LLM_ACCT'] : 0;
+        return $ctx ?: ((int)(current_account_id() ?? 0) ?: null);
+    }
     $h = hash('sha256', $apiKey);
     if (array_key_exists($h, $memo)) return $memo[$h];
     global $pdo;
@@ -30797,11 +30882,20 @@ function bc_llm_log(string $provider, string $model, string $apiKey, ?array $usa
         }
         $row = [bc_llm_key_owner($apiKey), $provider, substr($model, 0, 80), bc_llm_purpose(),
                 $in, $outT, $cached, $est, (int)round((microtime(true) - $t0) * 1000),
-                $err ? 0 : 1, $err ? mb_substr(preg_replace('/\s+/', ' ', $err->getMessage()), 0, 250) : null];
-        $sql = "INSERT INTO bc_llm_usage (account_id, provider, model, purpose, input_tokens, output_tokens, cached_tokens, estimated, latency_ms, ok, error) VALUES (?,?,?,?,?,?,?,?,?,?,?)";
+                $err ? 0 : 1, $err ? mb_substr(preg_replace('/\s+/', ' ', $err->getMessage()), 0, 250) : null,
+                llm_is_builtin_key($apiKey) ? 1 : 0];
+        $sql = "INSERT INTO bc_llm_usage (account_id, provider, model, purpose, input_tokens, output_tokens, cached_tokens, estimated, latency_ms, ok, error, builtin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)";
         try { $pdo->prepare($sql)->execute($row); }
         catch (Throwable $e) {
-            if (strpos($e->getMessage(), '1146') === false && stripos($e->getMessage(), "doesn't exist") === false) throw $e;
+            $m = $e->getMessage();
+            // Made before the built-in AI existed: add the column it needs.
+            if (stripos($m, 'Unknown column') !== false && stripos($m, 'builtin') !== false) {
+                try { $pdo->exec("ALTER TABLE bc_llm_usage ADD COLUMN builtin TINYINT(1) NOT NULL DEFAULT 0, ADD INDEX idx_builtin_created (builtin, created_at)"); }
+                catch (Throwable $e2) {}                          // added meanwhile by another request, or by admin.php
+                $pdo->prepare($sql)->execute($row);
+                return;
+            }
+            if (strpos($m, '1146') === false && stripos($m, "doesn't exist") === false) throw $e;
             $pdo->exec("CREATE TABLE IF NOT EXISTS bc_llm_usage (
                 id             BIGINT AUTO_INCREMENT PRIMARY KEY,
                 account_id     INT          NULL DEFAULT NULL,
@@ -30815,9 +30909,11 @@ function bc_llm_log(string $provider, string $model, string $apiKey, ?array $usa
                 latency_ms     INT          NOT NULL DEFAULT 0,
                 ok             TINYINT(1)   NOT NULL DEFAULT 1,
                 error          VARCHAR(255) NULL DEFAULT NULL,
+                builtin        TINYINT(1)   NOT NULL DEFAULT 0,
                 created_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
                 INDEX idx_created (created_at),
-                INDEX idx_acc_created (account_id, created_at)
+                INDEX idx_acc_created (account_id, created_at),
+                INDEX idx_builtin_created (builtin, created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             $pdo->prepare($sql)->execute($row);
         }

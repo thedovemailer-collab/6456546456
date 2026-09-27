@@ -19,6 +19,13 @@
 //   api.php records every AI call in bc_llm_usage (tokens in and out, per
 //   account). This page prices them with the list in Settings → AI prices,
 //   which you can edit. Usage before that api.php update isn't recorded.
+//
+// BUILT-IN AI
+//   Settings → Built-in AI holds an AI key of your own. Accounts can pick
+//   it in the app (Connections → AI provider) instead of adding a key.
+//   Calls on it are recorded apart (bc_llm_usage.builtin = 1) and are the
+//   cost this console shows; what accounts spend on their own keys is only
+//   shown when you choose to see it (the switch on the AI page).
 
 const ADMIN_USERNAME      = 'admin';
 const ADMIN_PASSWORD_HASH = '$2y$10$0Q96f1H9yZjJXw.MZx9PtuG/NkQ9..269aYXRUyFPvwp1nGsXUALW';          // paste the hash from the setup screen here
@@ -29,7 +36,7 @@ const ADMIN_IDLE_MINUTES  = 120;         // …or after this long without using 
 const ADMIN_APP_URL       = 'BotCommand.html';
 const ADMIN_API_FILE      = 'api.php';
 const ADMIN_DB            = ['host' => '', 'name' => '', 'user' => '', 'pass' => ''];
-const A_SCHEMA_V          = 3;
+const A_SCHEMA_V          = 4;
 
 // ── If something goes wrong, say what ────────────────────────
 // A PHP fatal error normally leaves the browser with a blank
@@ -170,14 +177,19 @@ function a_ensure_schema(): void {
             provider VARCHAR(12) NOT NULL, model VARCHAR(80) NOT NULL DEFAULT '', purpose VARCHAR(60) NOT NULL DEFAULT '',
             input_tokens INT NOT NULL DEFAULT 0, output_tokens INT NOT NULL DEFAULT 0, cached_tokens INT NOT NULL DEFAULT 0,
             estimated TINYINT(1) NOT NULL DEFAULT 0, latency_ms INT NOT NULL DEFAULT 0, ok TINYINT(1) NOT NULL DEFAULT 1,
-            error VARCHAR(255) NULL DEFAULT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_created (created_at), INDEX idx_acc_created (account_id, created_at)
+            error VARCHAR(255) NULL DEFAULT NULL, builtin TINYINT(1) NOT NULL DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_created (created_at), INDEX idx_acc_created (account_id, created_at), INDEX idx_builtin_created (builtin, created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         "CREATE TABLE IF NOT EXISTS bc_rate (
             k VARCHAR(100) NOT NULL PRIMARY KEY, win_start INT NOT NULL DEFAULT 0, n INT NOT NULL DEFAULT 0, INDEX idx_win (win_start)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
     foreach ($ddl as $q) { try { $pdo->exec($q); } catch (Throwable $e) { a_warn($e, $q); } }
+    a_schema(true);
+    // Calls on the built-in AI are told apart from calls on accounts' own keys.
+    if (a_has('bc_llm_usage') && !a_col('bc_llm_usage', 'builtin')) {
+        try { $pdo->exec("ALTER TABLE bc_llm_usage ADD COLUMN builtin TINYINT(1) NOT NULL DEFAULT 0, ADD INDEX idx_builtin_created (builtin, created_at)"); } catch (Throwable $e) { a_warn($e); }
+    }
     if (a_has('bc_accounts')) {
         $add = [
             'suspended_at'   => 'TIMESTAMP NULL DEFAULT NULL',
@@ -359,6 +371,37 @@ function a_cost(string $model, string $provider, float $in, float $cached, float
     return (($in - $cached) * $pr['in'] + $cached * $pr['cached'] + $out * $pr['out']) / 1e6;
 }
 
+// ── Built-in AI ──────────────────────────────────────────────
+// Your own AI key, offered to every account (api.php reads these settings;
+// the key itself never goes back to a browser, this page's included).
+const A_PROVIDERS = ['gemini', 'openai', 'claude'];
+function a_builtin(): array {
+    $pv = (string)a_setting('builtin_llm_provider', 'gemini');
+    if (!in_array($pv, A_PROVIDERS, true)) $pv = 'gemini';
+    $model = (string)a_setting('builtin_llm_model', '');
+    if ($model === '') foreach (a_prices() as $m => $v) { if ($v['provider'] === $pv) { $model = $m; break; } }
+    $key = (string)a_setting('builtin_llm_key', '');
+    return ['on' => (string)a_setting('builtin_llm_on', '0') === '1', 'provider' => $pv, 'model' => $model,
+            'has_key' => $key !== '', 'key_hint' => $key === '' ? '' : '••••' . substr($key, -4)];
+}
+// Accounts that chose the built-in AI in the app.
+function a_builtin_users(): int {
+    return (int)a_val("SELECT COUNT(DISTINCT account_id) FROM bc_credentials WHERE `key`='llm_active' AND value='builtin'");
+}
+// Whose AI costs the console counts: 'builtin' (calls on your built-in AI —
+// the default), 'own' (calls on accounts' own keys) or 'all'.
+function a_ai_scope(): string {
+    $s = (string)a_setting('ai_scope', 'builtin');
+    return in_array($s, ['builtin', 'own', 'all'], true) ? $s : 'builtin';
+}
+// SQL condition on bc_llm_usage for that scope.
+function a_llm_where(?string $scope = null, string $alias = ''): string {
+    $s = $scope ?? a_ai_scope();
+    if ($s === 'all') return '1=1';
+    if (!a_col('bc_llm_usage', 'builtin')) return $s === 'own' ? '1=1' : '0=1';   // nothing was on the built-in AI yet
+    return $alias . 'builtin' . ($s === 'own' ? '=0' : '=1');
+}
+
 // ── Money ────────────────────────────────────────────────────
 // Sales are recorded in whatever currency the seller priced in. These rates
 // turn them into one USD figure; edit them in Settings.
@@ -506,7 +549,7 @@ function a_llm_by_account(string $from): array {
     if (!a_has('bc_llm_usage')) return $out;
     foreach (a_rows("SELECT account_id a, provider, model, COUNT(*) calls, SUM(ok=0) errs, SUM(input_tokens) i, SUM(cached_tokens) c,
                             SUM(output_tokens) o, SUM(latency_ms) lat
-                       FROM bc_llm_usage WHERE created_at >= ? GROUP BY account_id, provider, model", [$from]) as $r) {
+                       FROM bc_llm_usage WHERE created_at >= ? AND " . a_llm_where() . " GROUP BY account_id, provider, model", [$from]) as $r) {
         $a = (int)$r['a'];
         $o = $out[$a] ?? ['calls' => 0, 'errors' => 0, 'in' => 0, 'out' => 0, 'cost' => 0.0, 'lat' => 0, 'models' => []];
         $cost = a_cost((string)$r['model'], (string)$r['provider'], (float)$r['i'], (float)$r['c'], (float)$r['o']);
@@ -694,6 +737,52 @@ function a_purpose_label(string $p): string {
     return $p === '' || $p === 'action:' ? 'Other' : $p;
 }
 
+// ── Bots (bc_bot_relay) ──────────────────────────────────────
+// Is a bot token saved for this account? The same places api.php looks:
+// tg_bot_token / dc_bot_token, then the active bot in 'platform_accounts'.
+function a_bot_token_saved(int $acc, string $platform): bool {
+    static $memo = [];
+    $k = $acc . ':' . $platform;
+    if (isset($memo[$k])) return $memo[$k];
+    $v = trim((string)a_val("SELECT value FROM bc_credentials WHERE account_id=? AND `key`=?", [$acc, $platform === 'discord' ? 'dc_bot_token' : 'tg_bot_token'], ''));
+    if ($v !== '') return $memo[$k] = true;
+    $m = json_decode((string)a_val("SELECT meta FROM bc_credentials WHERE account_id=? AND `key`='platform_accounts'", [$acc], ''), true);
+    if (is_array($m)) {
+        $active = (string)($m[$platform === 'discord' ? 'activeDc' : 'activeTg'] ?? '');
+        foreach ((array)($m[$platform] ?? []) as $a) {
+            if (!is_array($a) || $active === '' || (string)($a['id'] ?? '') !== $active) continue;
+            if ($platform === 'telegram' && ($a['mode'] ?? 'bot') !== 'bot') break;
+            if (trim((string)($a['token'] ?? '')) !== '') return $memo[$k] = true;
+        }
+    }
+    return $memo[$k] = false;
+}
+// Bot rows with what is true now: 'state' is on | desktop (the desktop app
+// is receiving for it) | erroring | off, 'token' whether one is saved, and
+// 'error' only an error that still holds — not one from before the token
+// was saved, before the desktop app took over, or after the bot recovered.
+function a_bot_rows(?int $acc = null): array {
+    if (!a_has('bc_bot_relay')) return [];
+    $host = a_col('bc_bot_relay', 'host_at') ? "(host_at IS NOT NULL AND host_at > NOW() - INTERVAL 90 SECOND)" : '0';
+    $rows = a_rows("SELECT account_id, platform, on_flag, bot_name, username, polled_at, fails, last_error, error_at, $host host_live,
+                           TIMESTAMPDIFF(SECOND, polled_at, NOW()) since_poll
+                      FROM bc_bot_relay" . ($acc !== null ? " WHERE account_id=?" : '') . " ORDER BY on_flag DESC, error_at DESC LIMIT 200", $acc !== null ? [$acc] : []);
+    foreach ($rows as &$x) {
+        $on = (int)$x['on_flag'] === 1;
+        $tok = a_bot_token_saved((int)$x['account_id'], (string)$x['platform']);
+        $err = (string)($x['last_error'] ?? '');
+        if (!$on || !empty($x['host_live']) || (int)$x['fails'] === 0) $err = '';
+        if ($err === 'No bot token saved.' && $tok) $err = '';       // saved since: the next poll picks it up
+        if ($err === '' && $on && !$tok && empty($x['host_live'])) $err = 'No bot token saved.';
+        $x['token'] = $tok;
+        $x['error'] = $err;
+        $x['state'] = !$on ? 'off' : (!empty($x['host_live']) ? 'desktop' : ($err !== '' ? 'erroring' : 'on'));
+        unset($x['last_error'], $x['host_live']);
+    }
+    unset($x);
+    return $rows;
+}
+
 // ══ READ ENDPOINTS ═══════════════════════════════════════════
 
 function api_overview(): array {
@@ -730,7 +819,7 @@ function api_overview(): array {
         $o = ['calls' => 0, 'errors' => 0, 'cost' => 0.0, 'tokens' => 0];
         if (!a_has('bc_llm_usage')) return $o;
         foreach (a_rows("SELECT provider, model, COUNT(*) n, SUM(ok=0) e, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o
-                           FROM bc_llm_usage WHERE created_at >= ? GROUP BY provider, model", [$from]) as $r) {
+                           FROM bc_llm_usage WHERE created_at >= ? AND " . a_llm_where() . " GROUP BY provider, model", [$from]) as $r) {
             $o['calls'] += (int)$r['n']; $o['errors'] += (int)$r['e']; $o['tokens'] += (int)$r['i'] + (int)$r['o'];
             $o['cost'] += a_cost((string)$r['model'], (string)$r['provider'], (float)$r['i'], (float)$r['c'], (float)$r['o']);
         }
@@ -753,7 +842,7 @@ function api_overview(): array {
     $ch = a_channels_series($r);
     $costDay = [];
     if (a_has('bc_llm_usage')) {
-        foreach (a_rows("SELECT $bm b, provider, model, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o FROM bc_llm_usage WHERE created_at >= ? GROUP BY b, provider, model", [$r['from']]) as $x) {
+        foreach (a_rows("SELECT $bm b, provider, model, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o FROM bc_llm_usage WHERE created_at >= ? AND " . a_llm_where() . " GROUP BY b, provider, model", [$r['from']]) as $x) {
             $costDay[$x['b']] = ($costDay[$x['b']] ?? 0) + a_cost((string)$x['model'], (string)$x['provider'], (float)$x['i'], (float)$x['c'], (float)$x['o']);
         }
     }
@@ -792,6 +881,7 @@ function api_overview(): array {
             'earn_30d' => $sales30['usd'] * $take / 100,
             'risk_high' => $high, 'risk_med' => $med, 'cooldowns' => $cool,
             'llm_paused' => (string)a_setting('llm_pause', '0') === '1',
+            'ai_scope' => a_ai_scope(), 'builtin' => a_builtin() + ['users' => a_builtin_users()],
         ],
         'series' => [
             'labels' => $r['buckets'], 'signups' => a_fill($r, $su), 'guests' => a_fill($r, $gu),
@@ -875,9 +965,12 @@ function a_feed(int $n): array {
         $ev[] = ['t' => $r['updated_at'], 'kind' => 'spam', 'acc' => (int)$r['account_id'],
                  'text' => 'Spam cooldown in a direct chat of ' . a_name_of((int)$r['account_id']) . ($r['spam_reason'] ? ': ' . mb_substr((string)$r['spam_reason'], 0, 80) : '')];
     }
-    if (a_has('bc_bot_relay')) foreach (a_rows("SELECT account_id, platform, last_error, error_at FROM bc_bot_relay WHERE error_at > NOW() - INTERVAL 1 DAY AND last_error IS NOT NULL ORDER BY error_at DESC LIMIT 6") as $r) {
+    $nb = 0;
+    foreach (a_bot_rows() as $r) {
+        // Only errors that still hold (see a_bot_rows).
+        if ($r['error'] === '' || empty($r['error_at']) || strtotime((string)$r['error_at']) < strtotime(a_now()) - 86400 || ++$nb > 6) continue;
         $ev[] = ['t' => $r['error_at'], 'kind' => 'bot', 'acc' => (int)$r['account_id'],
-                 'text' => ucfirst((string)$r['platform']) . ' bot of ' . a_name_of((int)$r['account_id']) . ': ' . mb_substr((string)$r['last_error'], 0, 90)];
+                 'text' => ucfirst((string)$r['platform']) . ' bot of ' . a_name_of((int)$r['account_id']) . ': ' . mb_substr($r['error'], 0, 90)];
     }
     foreach (a_rows("SELECT action, target_id, detail, created_at FROM bc_admin_audit WHERE action NOT IN ('login','logout') ORDER BY id DESC LIMIT 6") as $r) {
         $ev[] = ['t' => $r['created_at'], 'kind' => 'admin', 'acc' => (int)$r['target_id'], 'text' => 'You: ' . $r['detail']];
@@ -942,7 +1035,7 @@ function api_accounts(array $q): array {
         return $c === 0 ? ($y['id'] <=> $x['id']) : $c * $dir;
     });
     $total = count($rows);
-    return ['rows' => array_slice($rows, ($page - 1) * $per, $per), 'total' => $total, 'page' => $page, 'pages' => max(1, (int)ceil($total / $per)), 'counts' => $counts];
+    return ['rows' => array_slice($rows, ($page - 1) * $per, $per), 'total' => $total, 'page' => $page, 'pages' => max(1, (int)ceil($total / $per)), 'counts' => $counts, 'ai_scope' => a_ai_scope()];
 }
 
 function api_account(int $id): array {
@@ -979,11 +1072,11 @@ function api_account(int $id): array {
     $allDm = a_has('bc_dm_messages') ? (int)a_val("SELECT (SELECT COUNT(*) FROM bc_dm_messages WHERE sender_id=?) + (SELECT COUNT(*) FROM bc_dm_messages WHERE recipient_id=?)", [$id, $id]) : 0;
 
     // AI usage
-    $llm = ['calls' => 0, 'errors' => 0, 'in' => 0, 'out' => 0, 'cost' => 0.0, 'cost_all' => 0.0, 'models' => [], 'daily' => [], 'errors_recent' => []];
+    $llm = ['calls' => 0, 'errors' => 0, 'in' => 0, 'out' => 0, 'cost' => 0.0, 'cost_all' => 0.0, 'models' => [], 'daily' => [], 'errors_recent' => [], 'scope' => a_ai_scope()];
     if (a_has('bc_llm_usage')) {
         $day = [];
         foreach (a_rows("SELECT DATE(created_at) b, provider, model, COUNT(*) n, SUM(ok=0) e, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o, SUM(latency_ms) l
-                           FROM bc_llm_usage WHERE account_id=? AND created_at >= ? GROUP BY b, provider, model", [$id, $from30]) as $x) {
+                           FROM bc_llm_usage WHERE account_id=? AND created_at >= ? AND " . a_llm_where() . " GROUP BY b, provider, model", [$id, $from30]) as $x) {
             $c = a_cost((string)$x['model'], (string)$x['provider'], (float)$x['i'], (float)$x['c'], (float)$x['o']);
             $llm['calls'] += (int)$x['n']; $llm['errors'] += (int)$x['e']; $llm['in'] += (int)$x['i']; $llm['out'] += (int)$x['o']; $llm['cost'] += $c;
             $day[$x['b']] = ($day[$x['b']] ?? 0) + $c;
@@ -991,13 +1084,13 @@ function api_account(int $id): array {
             $llm['models'][$mk] = $llm['models'][$mk] ?? ['model' => $mk, 'provider' => $x['provider'], 'calls' => 0, 'cost' => 0.0, 'tokens' => 0, 'lat' => 0];
             $llm['models'][$mk]['calls'] += (int)$x['n']; $llm['models'][$mk]['cost'] += $c; $llm['models'][$mk]['tokens'] += (int)$x['i'] + (int)$x['o']; $llm['models'][$mk]['lat'] += (int)$x['l'];
         }
-        foreach (a_rows("SELECT provider, model, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o FROM bc_llm_usage WHERE account_id=? GROUP BY provider, model", [$id]) as $x) {
+        foreach (a_rows("SELECT provider, model, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o FROM bc_llm_usage WHERE account_id=? AND " . a_llm_where() . " GROUP BY provider, model", [$id]) as $x) {
             $llm['cost_all'] += a_cost((string)$x['model'], (string)$x['provider'], (float)$x['i'], (float)$x['c'], (float)$x['o']);
         }
         $llm['daily'] = array_map(fn($v) => round($v, 4), a_fill($r, $day, 0.0));
         $llm['models'] = array_values($llm['models']);
         usort($llm['models'], fn($x, $y) => $y['cost'] <=> $x['cost']);
-        $llm['errors_recent'] = a_rows("SELECT model, error, created_at FROM bc_llm_usage WHERE account_id=? AND ok=0 ORDER BY id DESC LIMIT 8", [$id]);
+        $llm['errors_recent'] = a_rows("SELECT model, error, created_at FROM bc_llm_usage WHERE account_id=? AND ok=0 AND " . a_llm_where() . " ORDER BY id DESC LIMIT 8", [$id]);
     }
 
     // Setup: AI provider and keys (masked), bots, contact page.
@@ -1006,7 +1099,14 @@ function api_account(int $id): array {
         $v = (string)$x['value'];
         $cred[$x['key']] = (preg_match('/model$|active$/', $x['key']) ? $v : ($v === '' ? '' : '••••' . substr($v, -4)));
     }
-    $bots = a_has('bc_bot_relay') ? a_rows("SELECT platform, on_flag, bot_name, username, polled_at, fails, last_error, error_at FROM bc_bot_relay WHERE account_id=?", [$id]) : [];
+    $bots = a_bot_rows($id);
+    // A token saved but the bot never switched on here: still worth showing.
+    foreach (['telegram', 'discord'] as $pl) {
+        if (!array_filter($bots, fn($b) => $b['platform'] === $pl) && a_bot_token_saved($id, $pl)) {
+            $bots[] = ['account_id' => $id, 'platform' => $pl, 'on_flag' => 0, 'bot_name' => '', 'username' => '', 'polled_at' => null, 'fails' => 0,
+                       'error_at' => null, 'since_poll' => null, 'token' => true, 'error' => '', 'state' => 'off'];
+        }
+    }
     $prof = a_has('bc_dm_profile') ? a_row("SELECT * FROM bc_dm_profile WHERE account_id=?", [$id]) : [];
     unset($prof['vault'], $prof['agent_priv'], $prof['page_theme']);
 
@@ -1217,7 +1317,7 @@ function api_ai(array $q): array {
     if ($has) {
         foreach (a_rows("SELECT $b b, provider, model, purpose, COUNT(*) n, SUM(ok=0) e, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o,
                                 SUM(latency_ms) l, SUM(estimated) est
-                           FROM bc_llm_usage WHERE created_at >= ? GROUP BY b, provider, model, purpose", [$r['from']]) as $x) {
+                           FROM bc_llm_usage WHERE created_at >= ? AND " . a_llm_where() . " GROUP BY b, provider, model, purpose", [$r['from']]) as $x) {
             $c = a_cost((string)$x['model'], (string)$x['provider'], (float)$x['i'], (float)$x['c'], (float)$x['o']);
             $n = (int)$x['n'];
             $tot['calls'] += $n; $tot['errors'] += (int)$x['e']; $tot['in'] += (int)$x['i']; $tot['out'] += (int)$x['o']; $tot['cached'] += (int)$x['c'];
@@ -1246,7 +1346,7 @@ function api_ai(array $q): array {
                   'lat' => $v['calls'] ? (int)round($v['lat'] / $v['calls']) : 0, 'models' => $v['models']];
     }
     usort($per, fn($x, $y) => $y['cost'] <=> $x['cost']);
-    $errs = $has ? a_rows("SELECT account_id, provider, model, purpose, error, latency_ms, created_at FROM bc_llm_usage WHERE ok=0 ORDER BY id DESC LIMIT 40") : [];
+    $errs = $has ? a_rows("SELECT account_id, provider, model, purpose, error, latency_ms, created_at FROM bc_llm_usage WHERE ok=0 AND " . a_llm_where() . " ORDER BY id DESC LIMIT 40") : [];
     foreach ($errs as &$e) { $e['who'] = a_name_of((int)$e['account_id']); $e['purpose'] = a_purpose_label((string)$e['purpose']); }
     unset($e);
     // What accounts have set up.
@@ -1259,6 +1359,7 @@ function api_ai(array $q): array {
     $days = max(1, $r['hourly'] ? 1 : min($r['days'], $since ? max(1, (int)ceil((strtotime(a_now()) - strtotime((string)$since)) / 86400)) : $r['days']));
     return [
         'range' => $r['key'], 'tracking_since' => $since, 'paused' => (string)a_setting('llm_pause', '0') === '1',
+        'scope' => a_ai_scope(), 'builtin' => a_builtin() + ['users' => a_builtin_users(), 'price' => a_price_for(a_builtin()['model'], a_builtin()['provider'])],
         'totals' => $tot + ['avg_lat' => $tot['calls'] ? (int)round($tot['lat'] / $tot['calls']) : 0, 'per_day' => $tot['cost'] / $days, 'projected_month' => $tot['cost'] / $days * 30],
         'series' => ['labels' => $r['buckets'], 'cost' => $provSeries, 'calls' => a_fill($r, $dayCalls), 'errors' => a_fill($r, $dayErr)],
         'providers' => $sortc($byProv), 'models' => $sortc($byModel), 'purposes' => $sortc($byPurpose),
@@ -1321,7 +1422,7 @@ function api_revenue(array $q): array {
         'range' => $r['key'], 'take_rate' => $take,
         'totals' => ['usd' => round($tot['usd'], 2), 'orders' => $tot['orders'], 'aov' => $tot['orders'] - $tot['other'] > 0 ? $tot['usd'] / ($tot['orders'] - $tot['other']) : 0,
                      'customers' => count($tot['customers']), 'sellers' => count($byAcc), 'other' => $tot['other'], 'unpaid' => $tot['unpaid'],
-                     'earn' => round($tot['usd'] * $take / 100, 2), 'llm_cost' => round($llmCost, 4)],
+                     'earn' => round($tot['usd'] * $take / 100, 2), 'llm_cost' => round($llmCost, 4), 'llm_scope' => a_ai_scope()],
         'series' => ['labels' => $r['buckets'], 'usd' => array_map(fn($v) => round($v, 2), a_fill($r, $day, 0.0)), 'orders' => a_fill($r, $dayN)],
         'currencies' => array_values($byCur), 'accounts' => array_slice($accRows, 0, 50), 'products' => array_slice($prod, 0, 20),
         'channels' => $byCh, 'invoices' => $fun, 'coins' => $coins, 'recent' => $recent,
@@ -1372,16 +1473,15 @@ function api_messages(array $q): array {
 function api_system(): array {
     $tables = a_rows("SELECT TABLE_NAME name, TABLE_ROWS n, DATA_LENGTH d, INDEX_LENGTH i FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC");
     $size = 0; foreach ($tables as $t) $size += (int)$t['d'] + (int)$t['i'];
-    $relay = ['on' => 0, 'off' => 0, 'erroring' => 0, 'stale' => 0, 'rows' => []];
-    if (a_has('bc_bot_relay')) {
-        foreach (a_rows("SELECT account_id, platform, on_flag, bot_name, username, polled_at, fails, last_error, error_at,
-                                TIMESTAMPDIFF(SECOND, polled_at, NOW()) since_poll FROM bc_bot_relay ORDER BY on_flag DESC, error_at DESC LIMIT 200") as $x) {
-            if ((int)$x['on_flag']) $relay['on']++; else $relay['off']++;
-            if ((int)$x['on_flag'] && (int)$x['fails'] > 0) $relay['erroring']++;
-            if ((int)$x['on_flag'] && ($x['since_poll'] === null || (int)$x['since_poll'] > 300)) $relay['stale']++;
-            $x['acc'] = a_acc_brief(a_accounts_all()[(int)$x['account_id']] ?? null);
-            $relay['rows'][] = $x;
-        }
+    $relay = ['on' => 0, 'off' => 0, 'erroring' => 0, 'stale' => 0, 'desktop' => 0, 'rows' => []];
+    foreach (a_bot_rows() as $x) {
+        if ((int)$x['on_flag']) $relay['on']++; else $relay['off']++;
+        if ($x['state'] === 'erroring') $relay['erroring']++;
+        if ($x['state'] === 'desktop') $relay['desktop']++;
+        // Not polled lately — only counts while the server is the one receiving.
+        if ($x['state'] === 'on' || $x['state'] === 'erroring') { if ($x['since_poll'] === null || (int)$x['since_poll'] > 300) $relay['stale']++; }
+        $x['acc'] = a_acc_brief(a_accounts_all()[(int)$x['account_id']] ?? null);
+        $relay['rows'][] = $x;
     }
     $q = [];
     $cnt = function (string $t, string $label, string $sql) use (&$q) { if (a_has($t)) $q[] = ['label' => $label, 'n' => (int)a_val($sql)]; };
@@ -1456,6 +1556,7 @@ function api_settings(): array {
     return [
         'prices' => $p, 'unpriced' => $seen, 'fx' => a_fx(), 'take_rate' => (float)a_setting('take_rate', 0),
         'refresh' => (int)a_setting('refresh_sec', 15), 'paused' => (string)a_setting('llm_pause', '0') === '1',
+        'builtin' => a_builtin() + ['users' => a_builtin_users()], 'ai_scope' => a_ai_scope(),
         'security' => ['username' => ADMIN_USERNAME, 'hashed' => ADMIN_PASSWORD_HASH !== '', 'allowlist' => count(ADMIN_IP_ALLOWLIST), 'hours' => ADMIN_SESSION_HOURS,
                        'idle' => ADMIN_IDLE_MINUTES, 'https' => $GLOBALS['A_HTTPS'], 'ip' => a_ip()],
     ];
@@ -1493,7 +1594,7 @@ function api_export(string $what, array $q): void {
         $r = a_range($q['range'] ?? '30d');
         fputcsv($o, ['date', 'account_id', 'account', 'provider', 'model', 'purpose', 'calls', 'errors', 'input_tokens', 'cached_tokens', 'output_tokens', 'cost_usd']);
         if (a_has('bc_llm_usage')) foreach (a_rows("SELECT DATE(created_at) d, account_id, provider, model, purpose, COUNT(*) n, SUM(ok=0) e, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o
-                                                      FROM bc_llm_usage WHERE created_at >= ? GROUP BY d, account_id, provider, model, purpose ORDER BY d, account_id", [$r['from']]) as $x) {
+                                                      FROM bc_llm_usage WHERE created_at >= ? AND " . a_llm_where() . " GROUP BY d, account_id, provider, model, purpose ORDER BY d, account_id", [$r['from']]) as $x) {
             fputcsv($o, [$x['d'], $x['account_id'], a_name_of((int)$x['account_id']), $x['provider'], $x['model'], a_purpose_label((string)$x['purpose']), $x['n'], $x['e'], $x['i'], $x['c'], $x['o'],
                          round(a_cost((string)$x['model'], (string)$x['provider'], (float)$x['i'], (float)$x['c'], (float)$x['o']), 6)]);
         }
@@ -1657,7 +1758,32 @@ function a_action(string $act, array $b): array {
             a_audit('llm_pause', null, $on ? 'Paused all AI calls' : 'Resumed AI calls');
             return ['ok' => true, 'paused' => $on];
         }
+        case 'ai_scope': {
+            $sc = (string)($b['scope'] ?? '');
+            if (!in_array($sc, ['builtin', 'own', 'all'], true)) a_fail('Unknown choice.');
+            a_setting_set('ai_scope', $sc);
+            return ['ok' => true, 'scope' => $sc];
+        }
         case 'settings_save': {
+            if (isset($b['builtin']) && is_array($b['builtin'])) {
+                $bi = $b['builtin'];
+                $was = a_builtin();
+                $pv = in_array($bi['provider'] ?? '', A_PROVIDERS, true) ? (string)$bi['provider'] : $was['provider'];
+                $model = trim((string)($bi['model'] ?? ''));
+                if ($model !== '' && !preg_match('/^[A-Za-z0-9._:\-\/]{2,80}$/', $model)) a_fail('That model name doesn’t look right.');
+                $key = trim((string)($bi['key'] ?? ''));
+                if ($key !== '' && (strlen($key) < 10 || strlen($key) > 400 || preg_match('/\s/', $key))) a_fail('That API key doesn’t look right.');
+                $on = !empty($bi['on']);
+                if ($on && $key === '' && !$was['has_key'] && empty($bi['clear_key'])) a_fail('Add an API key before turning the built-in AI on.');
+                a_setting_set('builtin_llm_provider', $pv);
+                a_setting_set('builtin_llm_model', $model);
+                if (!empty($bi['clear_key'])) { a_setting_set('builtin_llm_key', ''); $on = false; }
+                elseif ($key !== '') a_setting_set('builtin_llm_key', $key);        // blank: keep the saved key
+                a_setting_set('builtin_llm_on', $on ? '1' : '0');
+                if ($on !== $was['on'] || $pv !== $was['provider'] || $model !== $was['model'] || $key !== '' || !empty($bi['clear_key'])) {
+                    a_audit('builtin_llm', null, 'Built-in AI ' . ($on ? 'on' : 'off') . ' · ' . $pv . ($model !== '' ? ' ' . $model : '') . ($key !== '' ? ' · new key' : '') . (!empty($bi['clear_key']) ? ' · key removed' : ''));
+                }
+            }
             if (isset($b['prices']) && is_array($b['prices'])) {
                 $out = [];
                 foreach ($b['prices'] as $r) {
@@ -2256,7 +2382,7 @@ const VIEWS = {
   messages: ['Messages', 'Volume on every channel, and the latest messages'],
   system: ['System health', 'Bots, background queues, database and server'],
   audit: ['Audit log', 'Everything done from this console'],
-  settings: ['Settings', 'Prices, currencies, your take rate and live updates'],
+  settings: ['Settings', 'Built-in AI, prices, currencies, your take rate and live updates'],
 };
 const RANGED = { ai: 1, revenue: 1, messages: 1 };
 
@@ -2579,6 +2705,10 @@ function ask(o) {
 // ══ VIEWS ═══════════════════════════════════════════════════
 const C = { tg: '#38bdf8', dc: '#818cf8', dm: '#5eead4', ai: '#e9a8ff', money: '#86efac', warn: '#f5a524', bad: '#ff5d6c', gem: '#7aa2ff', oai: '#d6dbe4', cla: '#e2906f' };
 const PROV = { gemini: ['Gemini', C.gem], openai: ['OpenAI', C.oai], claude: ['Claude', C.cla] };
+// Whose AI costs are counted (Settings → AI page switch): your built-in AI by default.
+const SCOPE = { builtin: ['Built-in AI', 'on your built-in AI'], own: ['Customers’ own keys', 'on customers’ own keys'], all: ['Both', 'on your built-in AI and customers’ own keys'] };
+const scopeOf = (s) => SCOPE[s] || SCOPE.builtin;
+const provName = (p) => p === 'builtin' ? 'Built-in AI' : (PROV[p] || [p])[0];
 const EV_ICON = { signup: 'i-user', guest: 'i-ghost', sale: 'i-coin', tx: 'i-coin', error: 'i-alert', spam: 'i-shield', bot: 'i-bot', admin: 'i-key' };
 
 const V = {};
@@ -2594,7 +2724,8 @@ V.overview = function (d) {
     + kpi({ label: 'Accounts', icon: 'i-users', value: n(k.accounts), sub: delta(k.signups_7d, k.signups_prev7) + ' ' + plural(k.signups_7d, 'sign-up') + ' this week', spark: s.signups, go: 'accounts' })
     + kpi({ label: 'Temporary accounts', icon: 'i-ghost', value: n(k.guests), sub: n(k.guests_today) + ' today · ' + pct(k.claimed, k.guests) + ' claimed', spark: s.guests, sparkColor: C.dc, go: 'guests' })
     + kpi({ label: 'Messages today', icon: 'i-chat', value: n(k.msg_today), sub: n(k.ai_today) + ' written by agents', spark: msgs, sparkColor: C.tg, go: 'messages' })
-    + kpi({ label: 'AI cost today', icon: 'i-spark', value: usd(k.llm_today.cost), sub: usd(k.llm_30d.cost) + ' in 30 days · ' + compact(k.llm_today.calls) + ' calls', spark: s.cost, sparkColor: C.ai, go: 'ai' })
+    + kpi({ label: k.ai_scope === 'builtin' ? 'Built-in AI cost today' : 'AI cost today', icon: 'i-spark', value: usd(k.llm_today.cost),
+        sub: usd(k.llm_30d.cost) + ' in 30 days · ' + (k.ai_scope === 'builtin' ? (k.builtin.on ? plural(k.builtin.users, 'account') + ' on it' : 'built-in AI is off') : esc(scopeOf(k.ai_scope)[1])), spark: s.cost, sparkColor: C.ai, go: 'ai' })
     + kpi({ label: 'Sales, 30 days', icon: 'i-coin', value: usd(k.sales_30d.usd), sub: k.take_rate > 0 ? 'You earn ' + usd(k.earn_30d) + ' at ' + k.take_rate + '%' : plural(k.sales_30d.n, 'order') + ' · ' + usd(k.sales_today.usd) + ' today', spark: s.sales, sparkColor: C.money, go: 'revenue' })
     + '</div>';
   h += '<div class="grid g21">'
@@ -2611,7 +2742,7 @@ V.overview = function (d) {
     + '</div>';
   h += '<div class="grid g3">'
     + card('Sign-ups', chart({ labels: s.labels, size: 'sm', series: [{ name: 'Accounts', color: C.dm, values: s.signups, type: 'bar' }, { name: 'Guests', color: C.dc, values: s.guests, type: 'bar' }], emptyText: 'No sign-ups yet' }), { right: legend([['Accounts', C.dm], ['Guests', C.dc]]) })
-    + card('AI cost per day', chart({ labels: s.labels, size: 'sm', fmt: usd, series: [{ name: 'Cost', color: C.ai, values: s.cost }], emptyText: 'No AI calls recorded yet' }), { hint: usd(s.cost.reduce((a, b) => a + b, 0)) + ' in 30 days' })
+    + card(k.ai_scope === 'builtin' ? 'Built-in AI cost per day' : 'AI cost per day', chart({ labels: s.labels, size: 'sm', fmt: usd, series: [{ name: 'Cost', color: C.ai, values: s.cost }], emptyText: k.ai_scope === 'builtin' ? 'No calls on the built-in AI yet' : 'No AI calls recorded yet' }), { hint: usd(s.cost.reduce((a, b) => a + b, 0)) + ' in 30 days' })
     + card('Sales per day', chart({ labels: s.labels, size: 'sm', fmt: usd, series: [{ name: 'Sales', color: C.money, values: s.sales, type: 'bar' }], emptyText: 'No sales yet' }), { hint: usd(k.sales_30d.usd) + ' in 30 days' })
     + '</div>';
   const feed = d.feed.length ? '<div class="feed">' + d.feed.map((e) => '<div class="ev"' + (e.acc ? ' data-acc="' + e.acc + '"' : '') + '><span class="ei ico-' + e.kind + '"><svg><use href="#' + (EV_ICON[e.kind] || 'i-bolt') + '"/></svg></span><span class="et">' + esc(e.text) + '</span><time>' + esc(ago(e.t)) + '</time></div>').join('') + '</div>' : empty('Nothing has happened yet');
@@ -2620,7 +2751,7 @@ V.overview = function (d) {
   h += '<div class="grid g21">'
     + card('What’s happening', feed, { flush: true, hint: 'newest first' })
     + '<div class="grid" style="align-content:start">'
-    + card('Top accounts', top(d.top[tt], tt === 'messages' ? n : usd), { flush: true, right: seg('top', tt, [['messages', 'Messages'], ['cost', 'AI cost'], ['sales', 'Sales']]) })
+    + card('Top accounts', top(d.top[tt], tt === 'messages' ? n : usd), { flush: true, right: seg('top', tt, [['messages', 'Messages'], ['cost', k.ai_scope === 'builtin' ? 'Built-in AI' : 'AI cost'], ['sales', 'Sales']]) })
     + card('Safety', '<dl class="kv">'
         + '<dt>High-risk accounts</dt><dd><a href="#/risk" class="chip ' + (k.risk_high ? 'bad' : '') + '">' + n(k.risk_high) + '</a></dd>'
         + '<dt>Medium-risk accounts</dt><dd><a href="#/risk" class="chip ' + (k.risk_med ? 'warn' : '') + '">' + n(k.risk_med) + '</a></dd>'
@@ -2641,7 +2772,7 @@ V.accounts = function (d) {
     + '<a class="btn btn-g" href="?api=export&what=accounts"><svg><use href="#i-down"/></svg>Export CSV</a></div>';
   if (!d.rows.length) return h + card('', empty('No accounts match', a.q ? 'Try a different search.' : 'Nothing in this list right now.'));
   h += '<section class="card"><div class="tw"><table class="t"><thead><tr>' + col('name', 'Account') + '<th>Status</th>' + col('created', 'Joined') + col('seen', 'Last seen')
-    + col('msgs', 'Messages 30d', 1) + col('ai', 'By agents 30d', 1) + col('cost', 'AI cost 30d', 1) + col('sales', 'Sales', 1) + col('convs', 'Chats', 1) + '<th class="r">Bots</th>' + col('risk', 'Risk') + '</tr></thead><tbody>';
+    + col('msgs', 'Messages 30d', 1) + col('ai', 'By agents 30d', 1) + col('cost', d.ai_scope === 'builtin' ? 'Built-in AI 30d' : 'AI cost 30d', 1) + col('sales', 'Sales', 1) + col('convs', 'Chats', 1) + '<th class="r">Bots</th>' + col('risk', 'Risk') + '</tr></thead><tbody>';
   d.rows.forEach((r) => {
     h += '<tr data-acc="' + r.id + '"><td>' + who(r, r.guest ? 'Guest of ' + (r.guest_of ? r.guest_of.name : '—') : null) + '</td><td>' + (chips(r) || '<span class="dim">Active</span>') + '</td>'
       + '<td class="dim">' + esc(day(r.created)) + '</td><td class="dim">' + esc(r.seen ? ago(r.seen) : 'never') + '</td>'
@@ -2733,10 +2864,22 @@ V.ai = function (d) {
   const t = d.totals, s = d.series;
   let h = '';
   if (d.paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>All AI calls are paused.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume AI</button></div>';
+  const sc = d.scope || 'builtin', bi = d.builtin || {};
+  // Whose calls this page counts. Your built-in AI is what you pay for;
+  // customers' own keys are theirs, shown only when you ask for them.
+  h += '<div class="toolbar"><span class="dim" style="font-size:12.5px">Showing costs</span>' + seg('aiscope', sc, [['builtin', 'Your built-in AI'], ['own', 'Customers’ own keys'], ['all', 'Both']]) + '<span class="grow"></span></div>';
+  const biPrice = bi.price ? '$' + (+bi.price.in).toFixed(2) + ' in / $' + (+bi.price.out).toFixed(2) + ' out per 1M tokens' + (bi.price.guess ? ' (fallback — add it to AI prices)' : '') : '';
+  h += card('Built-in AI', '<div class="row-f"><div class="tx"><b>' + (bi.on ? 'On' : 'Off') + (bi.model ? ' · <span class="mono">' + esc(bi.model) + '</span>' : '') + ' <span class="dim">(' + esc(provName(bi.provider)) + ')</span></b>'
+      + '<span>' + (bi.on ? plural(bi.users || 0, 'account') + ' chose it in the app. ' : (bi.has_key ? 'The key is saved; turn it on so accounts can choose it. ' : 'No key saved yet. ')) + esc(biPrice) + '</span></div>'
+      + '<a class="btn btn-g btn-s" href="#/settings">' + (bi.has_key ? 'Change' : 'Set it up') + '</a></div>', { hint: 'your key, offered to every account' });
   if (!d.tracking_since) h += '<div class="banner info"><svg><use href="#i-spark"/></svg><span>No AI calls recorded yet. Once the new api.php is on the server, every call is recorded here with its tokens and cost.</span></div>';
-  else h += '<div class="banner info"><svg><use href="#i-spark"/></svg><span>Recording since ' + esc(when(d.tracking_since)) + '. Each account uses its own API key, so these are costs on their keys, priced with your list in <a href="#/settings" style="text-decoration:underline">Settings</a>.' + (t.est ? ' ' + n(t.est) + ' calls didn’t report tokens and were estimated.' : '') + '</span></div>';
+  else h += '<div class="banner info"><svg><use href="#i-spark"/></svg><span>Recording since ' + esc(when(d.tracking_since)) + '. '
+    + (sc === 'builtin' ? 'These are calls on your built-in AI key — what you pay for. Customers’ calls on their own keys are left out.'
+      : sc === 'own' ? 'These are calls on customers’ own API keys: their cost, not yours.'
+      : 'These are all calls: on your built-in AI and on customers’ own keys.')
+    + ' Priced with your list in <a href="#/settings" style="text-decoration:underline">Settings</a>.' + (t.est ? ' ' + n(t.est) + ' calls didn’t report tokens and were estimated.' : '') + '</span></div>';
   h += '<div class="grid g6">'
-    + kpi({ label: 'AI cost', icon: 'i-spark', value: usd(t.cost), hero: true, sub: usd(t.per_day) + ' a day on average' })
+    + kpi({ label: sc === 'builtin' ? 'Built-in AI cost' : sc === 'own' ? 'Cost on customers’ keys' : 'AI cost', icon: 'i-spark', value: usd(t.cost), hero: true, sub: usd(t.per_day) + ' a day on average' })
     + kpi({ label: 'At this pace, a month', icon: 'i-coin', value: usd(t.projected_month) })
     + kpi({ label: 'Calls', icon: 'i-bolt', value: compact(t.calls), spark: s.calls, sparkColor: C.ai })
     + kpi({ label: 'Failed', icon: 'i-alert', value: pct(t.errors, t.calls), sub: n(t.errors) + ' calls', spark: s.errors, sparkColor: C.bad })
@@ -2769,7 +2912,7 @@ V.ai = function (d) {
         + '</tbody></table></div>' : empty('No failures', 'Every recorded call went through.'), { flush: true })
     + card('How accounts are set up', '<dl class="kv">'
         + ps.map((p) => '<dt>Accounts with a ' + PROV[p][0] + ' key</dt><dd class="num">' + n(st.keys[p] || 0) + '</dd>').join('')
-        + Object.entries(st.active).map((x) => '<dt>Using ' + esc((PROV[x[0]] || [x[0]])[0]) + ' by default</dt><dd class="num">' + n(x[1]) + '</dd>').join('')
+        + Object.entries(st.active).map((x) => '<dt>Using ' + esc(provName(x[0])) + (x[0] === 'builtin' ? '' : ' by default') + '</dt><dd class="num">' + n(x[1]) + '</dd>').join('')
         + '</dl><div style="margin-top:16px">' + bars(Object.entries(st.agent_models).map((x) => ['<span class="mono">' + esc(x[0]) + '</span>', x[1]])) + '</div><p class="dim" style="font-size:12px;margin:10px 0 0">Models chosen by active agents.</p>')
     + '</div>';
   return h;
@@ -2784,7 +2927,7 @@ V.revenue = function (d) {
     + kpi({ label: 'Paying customers', icon: 'i-users', value: n(t.customers), sub: 'across ' + plural(t.sellers, 'seller') })
     + (d.take_rate > 0 ? kpi({ label: 'Your earnings', icon: 'i-spark', value: usd(t.earn), sub: 'at ' + d.take_rate + '% of sales' })
                        : kpi({ label: 'Your earnings', icon: 'i-spark', value: '—', sub: '<a href="#/settings" style="text-decoration:underline">Set your take rate</a> to see them' }))
-    + kpi({ label: 'AI cost, same period', icon: 'i-bolt', value: usd(t.llm_cost), sub: 'on sellers’ own keys', go: 'ai' })
+    + kpi({ label: t.llm_scope === 'builtin' ? 'Built-in AI cost, same period' : 'AI cost, same period', icon: 'i-bolt', value: usd(t.llm_cost), sub: esc(scopeOf(t.llm_scope)[1]), go: 'ai' })
     + '</div>';
   h += '<div class="grid g21">'
     + card('Sales', chart({ labels: d.series.labels, fmt: usd, series: [{ name: 'Sales', color: C.money, values: d.series.usd, type: 'bar' }, { name: 'Orders', color: C.tg, values: d.series.orders, fill: false, axis2: true, fmt: n }], emptyText: 'No sales in this period' }), { right: legend([['Sales (USD)', C.money], ['Orders', C.tg]]) })
@@ -2841,6 +2984,13 @@ V.messages = function (d) {
   return h;
 };
 
+// A bot's state now: receiving on the server, on the desktop app, erroring or off.
+function botState(b) {
+  if (b.state === 'desktop') return '<span class="chip ok" title="The desktop app is receiving for this bot"><i></i>Desktop app</span>';
+  if (b.state === 'erroring') return '<span class="chip warn" title="' + esc(b.error || '') + '"><i></i>Erroring</span>';
+  if (b.state === 'on') return '<span class="chip ok"><i></i>On</span>';
+  return '<span class="chip">Off</span>';
+}
 V.system = function (d) {
   const r = d.relay;
   let h = '';
@@ -2848,7 +2998,7 @@ V.system = function (d) {
   if (d.paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>All AI calls are paused.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume AI</button></div>';
   const bad = d.queues.filter((q) => /overdue|failed/i.test(q.label) && q.n > 0).length;
   h += '<div class="grid g6">'
-    + kpi({ label: 'Bots running', icon: 'i-bot', value: n(r.on), hero: true, sub: n(r.off) + ' turned off' })
+    + kpi({ label: 'Bots running', icon: 'i-bot', value: n(r.on), hero: true, sub: n(r.off) + ' turned off' + (r.desktop ? ' · ' + n(r.desktop) + ' on the desktop app' : '') })
     + kpi({ label: 'Bots with errors', icon: 'i-alert', value: n(r.erroring), sub: n(r.stale) + ' not polled in 5 min' })
     + kpi({ label: 'Queue warnings', icon: 'i-list', value: n(bad), sub: bad ? 'see below' : 'all queues moving' })
     + kpi({ label: 'AI calls, last hour', icon: 'i-spark', value: n(d.llm_hour.calls), sub: n(d.llm_hour.errors) + ' failed · ' + (d.llm_hour.lat / 1000).toFixed(1) + 's average' })
@@ -2865,11 +3015,11 @@ V.system = function (d) {
         + '<dt>Free disk</dt><dd>' + (d.php.disk_free ? bytes(d.php.disk_free) : '—') + '</dd><dt>cURL</dt><dd>' + (d.php.curl ? 'available' : '<span class="chip bad">missing</span>') + '</dd>'
         + '<dt>api.php</dt><dd>' + (d.php.api_patched ? '<span class="chip ok">Recording AI usage</span>' : '<span class="chip warn">Old version</span>') + '</dd></dl>')
     + '</div>';
-  h += card('Bots', r.rows.length ? '<div class="tw"><table class="t"><thead><tr><th>Account</th><th>Bot</th><th>State</th><th>Last poll</th><th class="r">Failures</th><th>Last error</th></tr></thead><tbody>'
+  h += card('Bots', r.rows.length ? '<div class="tw"><table class="t"><thead><tr><th>Account</th><th>Bot</th><th>State</th><th>Token</th><th>Last poll</th><th class="r">Failures</th><th>Error now</th></tr></thead><tbody>'
       + r.rows.map((b) => '<tr data-acc="' + b.account_id + '"><td>' + esc(b.acc ? b.acc.name : '#' + b.account_id) + '</td><td>' + plat(b.platform) + ' ' + esc(b.bot_name || b.username || '') + '</td>'
-        + '<td>' + (+b.on_flag ? (+b.fails ? '<span class="chip warn"><i></i>Erroring</span>' : '<span class="chip ok"><i></i>On</span>') : '<span class="chip">Off</span>') + '</td>'
-        + '<td class="dim">' + esc(b.polled_at ? ago(b.polled_at) : 'never') + '</td><td class="r num">' + n(b.fails) + '</td><td class="clip dim" title="' + esc(b.last_error || '') + '">' + esc(b.last_error || '—') + '</td></tr>').join('')
-      + '</tbody></table></div>' : empty('No bots connected'), { flush: true });
+        + '<td>' + botState(b) + '</td><td>' + (b.token ? '<span class="chip ok">Saved</span>' : '<span class="chip bad">None</span>') + '</td>'
+        + '<td class="dim">' + esc(b.polled_at ? ago(b.polled_at) : 'never') + '</td><td class="r num">' + (b.error ? n(b.fails) : '<span class="dim">0</span>') + '</td><td class="clip dim" title="' + esc(b.error || '') + '">' + esc(b.error || '—') + '</td></tr>').join('')
+      + '</tbody></table></div>' : empty('No bots connected'), { flush: true, hint: 'errors shown only while they still apply' });
   h += '<div class="grid g2">'
     + card('Largest tables', '<div class="tw"><table class="t"><thead><tr><th>Table</th><th class="r">Rows</th><th class="r">Size</th></tr></thead><tbody>'
         + d.db.tables.slice(0, 18).map((x) => '<tr><td class="mono">' + esc(x.name) + '</td><td class="r num">~' + compact(x.n) + '</td><td class="r num">' + bytes(+x.d + +x.i) + '</td></tr>').join('') + '</tbody></table></div>', { flush: true })
@@ -2880,7 +3030,7 @@ V.system = function (d) {
 
 V.audit = function (d) {
   const L = { login: 'Signed in', logout: 'Signed out', suspend: 'Suspended', unsuspend: 'Unsuspended', delete: 'Deleted', impersonate: 'Opened app as', reset_password: 'Password reset', bots_off: 'Bots off',
-    clear_cooldowns: 'Cooldowns cleared', clear_limits: 'Limits reset', host_prefs: 'Contact page', purge_guests: 'Guests removed', llm_pause: 'AI switch', settings: 'Settings' };
+    clear_cooldowns: 'Cooldowns cleared', clear_limits: 'Limits reset', host_prefs: 'Contact page', purge_guests: 'Guests removed', llm_pause: 'AI switch', settings: 'Settings', builtin_llm: 'Built-in AI' };
   if (!d.rows.length) return card('', empty('Nothing yet', 'Actions taken here are listed as you make them.'));
   return card('', '<div class="tw"><table class="t"><thead><tr><th>When</th><th>Action</th><th>Account</th><th>Detail</th><th>From</th></tr></thead><tbody>'
     + d.rows.map((r) => '<tr' + (r.target && r.target.username ? ' data-acc="' + r.target.id + '"' : '') + '><td class="dim" style="white-space:nowrap">' + esc(when(r.created_at)) + '</td><td><span class="chip ' + (/delete|suspend$/.test(r.action) ? 'bad' : r.action === 'impersonate' ? 'warn' : 'info') + '">' + esc(L[r.action] || r.action) + '</span></td>'
@@ -2890,8 +3040,20 @@ V.audit = function (d) {
 
 V.settings = function (d) {
   S.set = JSON.parse(JSON.stringify(d));
-  const sec = d.security;
-  let h = card('Live switches', '<div class="row-f"><div class="tx"><b>Pause all AI</b><span>Every agent on every account stops calling the AI until you turn this off. Customers simply get no reply.</span></div>'
+  S.biClear = false;
+  const sec = d.security, bi = d.builtin || {};
+  let h = card('Built-in AI', '<p class="dim" style="margin:0 0 12px;font-size:12.5px">Your own AI key, offered to every account. In the app, accounts choose <b>Built-in AI</b> under Connections → AI provider instead of adding a key of their own. '
+      + 'Calls on it are what you pay for, and are the cost shown across this console. The key stays on the server: it is never sent to the app or back to this page.</p>'
+      + '<div class="row-f"><div class="tx"><b>Offer the built-in AI</b><span>' + (bi.users ? plural(bi.users, 'account') + ' chose it. Turning it off moves them back to their own keys, if they have any.' : 'No account uses it yet.') + '</span></div>'
+      + '<button class="sw" role="switch" id="bi-on" data-act="bi-toggle" aria-checked="' + (bi.on ? 'true' : 'false') + '" aria-label="Offer the built-in AI"></button></div>'
+      + '<div class="row-f"><div class="tx"><b>Provider and model</b><span id="bi-price">' + esc(biPriceText(d.prices, bi.model)) + '</span></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+      + '<select class="inp" id="bi-prov" style="width:120px;height:32px">' + ['gemini', 'openai', 'claude'].map((x) => '<option value="' + x + '"' + (x === bi.provider ? ' selected' : '') + '>' + PROV[x][0] + '</option>').join('') + '</select>'
+      + '<select class="inp mono" id="bi-model" style="width:230px;height:32px">' + biModelOptions(d.prices, bi.provider, bi.model) + '</select></div></div>'
+      + '<div class="row-f"><div class="tx"><b>API key</b><span>' + (bi.has_key ? 'Saved (' + esc(bi.key_hint) + '). Leave the box empty to keep it.' : 'None saved yet.') + '</span></div><div style="display:flex;gap:8px;align-items:center">'
+      + '<input class="inp mono" id="bi-key" type="password" autocomplete="new-password" placeholder="' + (bi.has_key ? 'Paste a new key to replace it' : 'Paste the API key') + '" style="width:260px;height:32px">'
+      + (bi.has_key ? '<button class="btn btn-g btn-s" data-act="bi-clear" title="Remove the saved key (turns the built-in AI off)">Remove</button>' : '') + '</div></div>'
+      + '<p class="dim" style="font-size:12px;margin:10px 0 0">Saved with <b>Save settings</b> below. Its price comes from the AI prices list.</p>');
+  h += card('Live switches', '<div class="row-f"><div class="tx"><b>Pause all AI</b><span>Every agent on every account stops calling the AI until you turn this off. Customers simply get no reply.</span></div>'
       + '<button class="sw danger" role="switch" data-act="toggle-ai" aria-checked="' + (d.paused ? 'true' : 'false') + '" aria-label="Pause all AI"></button></div>'
       + '<div class="row-f"><div class="tx"><b>Live updates every</b><span>How often open pages refresh themselves.</span></div><div style="display:flex;gap:8px;align-items:center"><input class="inp" id="set-refresh" type="number" min="5" max="300" value="' + d.refresh + '" style="width:80px;height:32px"><span class="dim">seconds</span></div></div>'
       + '<div class="row-f"><div class="tx"><b>Your take rate</b><span>The share of sellers’ sales you count as your earnings (0 hides it). booqi itself doesn’t charge this; it’s for your own figures.</span></div><div style="display:flex;gap:8px;align-items:center"><input class="inp" id="set-take" type="number" min="0" max="100" step="0.1" value="' + d.take_rate + '" style="width:80px;height:32px"><span class="dim">%</span></div></div>');
@@ -2910,6 +3072,17 @@ V.settings = function (d) {
   h += '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn btn-p" data-act="save-settings"><svg><use href="#i-check"/></svg>Save settings</button></div>';
   return h;
 };
+// Built-in AI: the models in your price list for a provider (and the one saved, if it isn't listed).
+function biModelOptions(prices, provider, cur) {
+  const list = (prices || []).filter((p) => p.provider === provider).map((p) => p.model);
+  const elsewhere = (prices || []).some((p) => p.model === cur && p.provider !== provider);
+  if (cur && !list.includes(cur) && !elsewhere) list.unshift(cur);
+  return list.length ? list.map((m) => '<option value="' + esc(m) + '"' + (m === cur ? ' selected' : '') + '>' + esc(m) + '</option>').join('') : '<option value="">(add a model for this provider to AI prices)</option>';
+}
+function biPriceText(prices, model) {
+  const p = (prices || []).find((x) => x.model === model);
+  return p ? '$' + (+p.in).toFixed(2) + ' in · $' + (+p.cached).toFixed(3) + ' cached · $' + (+p.out).toFixed(2) + ' out, per 1M tokens' : 'Not in your price list — priced at the provider’s fallback.';
+}
 function priceRows(list) {
   return list.map((p) => '<tr><td><input class="inp mono" data-f="model" value="' + esc(p.model) + '"></td><td><select class="inp" data-f="provider">' + ['gemini', 'openai', 'claude'].map((x) => '<option value="' + x + '"' + (x === p.provider ? ' selected' : '') + '>' + PROV[x][0] + '</option>').join('') + '</select></td>'
     + ['in', 'cached', 'out'].map((f) => '<td><input class="inp num" data-f="' + f + '" type="number" step="0.001" min="0" value="' + esc(p[f]) + '" style="text-align:right;width:100px;margin-left:auto;display:block"></td>').join('')
@@ -2969,7 +3142,7 @@ DT.overview = function (d) {
   let h = '<div class="grid g4">'
     + kpi({ label: 'Messages, all time', icon: 'i-chat', value: compact(st.msgs_all), spark: s.telegram.map((v, i) => v + s.discord[i] + s.direct[i]), sparkColor: C.tg })
     + kpi({ label: 'Sales, all time', icon: 'i-coin', value: usd(st.sales_all), sub: usd(st.sales_30d) + ' in 30 days', spark: s.sales, sparkColor: C.money })
-    + kpi({ label: 'AI cost, 30 days', icon: 'i-spark', value: usd(d.llm.cost), sub: usd(d.llm.cost_all) + ' all time', spark: d.llm.daily, sparkColor: C.ai })
+    + kpi({ label: d.llm.scope === 'builtin' ? 'Built-in AI, 30 days' : 'AI cost, 30 days', icon: 'i-spark', value: usd(d.llm.cost), sub: usd(d.llm.cost_all) + ' all time', spark: d.llm.daily, sparkColor: C.ai })
     + kpi({ label: 'Customers', icon: 'i-users', value: n(st.customers), sub: n(st.convs) + ' chats · ' + n(st.licenses) + ' licences' })
     + '</div>';
   h += card('Messages, 30 days', chart({ labels: s.labels, size: 'sm', stacked: true, series: [{ name: 'Telegram', color: C.tg, values: s.telegram, type: 'bar' }, { name: 'Discord', color: C.dc, values: s.discord, type: 'bar' },
@@ -2977,10 +3150,12 @@ DT.overview = function (d) {
   const prof = d.profile || {};
   const pv = c.llm_active || '';
   h += '<div class="grid g2">'
-    + card('AI setup', '<dl class="kv"><dt>Default provider</dt><dd>' + (pv ? esc((PROV[pv] || [pv])[0]) : '<span class="dim">not set</span>') + '</dd>'
+    + card('AI setup', '<dl class="kv"><dt>Default provider</dt><dd>' + (pv ? esc(provName(pv)) + (pv === 'builtin' ? ' <span class="chip info">your key</span>' : '') : '<span class="dim">not set</span>') + '</dd>'
       + ['gemini', 'openai', 'claude'].map((p) => '<dt>' + PROV[p][0] + ' key</dt><dd class="mono">' + (c['llm_' + p] ? esc(c['llm_' + p]) + (c['llm_' + p + '_model'] ? ' <span class="dim">· ' + esc(c['llm_' + p + '_model']) + '</span>' : '') : '<span class="dim">—</span>') + '</dd>').join('')
       + '</dl>')
-    + card('Channels', '<dl class="kv">' + (d.bots.length ? d.bots.map((b) => '<dt>' + plat(b.platform) + ' ' + esc(b.bot_name || b.username || '') + '</dt><dd>' + (+b.on_flag ? (+b.fails ? '<span class="chip warn" title="' + esc(b.last_error || '') + '">Erroring</span>' : '<span class="chip ok">On</span>') : '<span class="chip">Off</span>') + ' <span class="dim">' + esc(b.polled_at ? ago(b.polled_at) : '') + '</span></dd>').join('') : '<dt>Bots</dt><dd class="dim">none connected</dd>')
+    + card('Channels', '<dl class="kv">' + (d.bots.length ? d.bots.map((b) => '<dt>' + plat(b.platform) + ' ' + esc(b.bot_name || b.username || '') + '</dt><dd>' + botState(b)
+        + (b.token ? ' <span class="chip ok" title="A bot token is saved">Token saved</span>' : ' <span class="chip bad" title="No bot token is saved for this bot">No token</span>')
+        + ' <span class="dim">' + esc(b.polled_at ? ago(b.polled_at) : '') + '</span>' + (b.error ? '<div class="dim" style="font-size:12px;margin-top:3px">' + esc(b.error) + '</div>' : '') + '</dd>').join('') : '<dt>Bots</dt><dd class="dim">none connected</dd>')
       + (d.acc.guest ? '' : '<dt>Contact page</dt><dd>' + hostSwitch('discoverable', prof.discoverable) + '</dd><dt>Guests may write</dt><dd>' + hostSwitch('allow_guests', prof.allow_guests) + '</dd><dt>Agent answers guests</dt><dd>' + hostSwitch('guest_ai', prof.guest_ai) + '</dd>')
       + '</dl>')
     + '</div>';
@@ -3019,7 +3194,8 @@ DT.sales = function (d) {
 };
 DT.ai = function (d) {
   const l = d.llm;
-  let h = '<div class="grid g4">' + kpi({ label: 'Cost, 30 days', value: usd(l.cost), sub: usd(l.cost_all) + ' all time' }) + kpi({ label: 'Calls', value: n(l.calls), sub: pct(l.errors, l.calls) + ' failed' })
+  let h = '<p class="dim" style="font-size:12.5px;margin:0 0 10px">Counting calls ' + esc(scopeOf(l.scope)[1]) + '. Change it on the <a href="#/ai" style="text-decoration:underline">AI page</a>.</p>'
+    + '<div class="grid g4">' + kpi({ label: 'Cost, 30 days', value: usd(l.cost), sub: usd(l.cost_all) + ' all time' }) + kpi({ label: 'Calls', value: n(l.calls), sub: pct(l.errors, l.calls) + ' failed' })
     + kpi({ label: 'Tokens in', value: compact(l.in) }) + kpi({ label: 'Tokens out', value: compact(l.out) }) + '</div>';
   h += card('AI cost per day', chart({ labels: d.series.labels, size: 'sm', fmt: usd, series: [{ name: 'Cost', color: C.ai, values: l.daily }], emptyText: 'No AI calls recorded in 30 days' }));
   h += card('Models', l.models.length ? '<div class="tw"><table class="t"><thead><tr><th>Model</th><th class="r">Calls</th><th class="r">Tokens</th><th class="r">Avg wait</th><th class="r">Cost</th></tr></thead><tbody>'
@@ -3220,7 +3396,9 @@ function collectSettings() {
   const prices = $$('#price-rows tr').map((tr) => { const o = {}; $$('[data-f]', tr).forEach((i) => { o[i.dataset.f] = i.value; }); return o; }).filter((p) => p.model && p.model.trim());
   const fx = {};
   $$('#fx-rows tr').forEach((tr) => { const c = $('[data-f="cur"]', tr).value.trim().toUpperCase(), r = $('[data-f="rate"]', tr).value; if (c && r) fx[c] = +r; });
-  return { prices: prices, fx: fx, take_rate: $('#set-take').value, refresh: $('#set-refresh').value };
+  const b = { prices: prices, fx: fx, take_rate: $('#set-take').value, refresh: $('#set-refresh').value };
+  if ($('#bi-on')) b.builtin = { on: $('#bi-on').getAttribute('aria-checked') === 'true', provider: $('#bi-prov').value, model: $('#bi-model').value, key: $('#bi-key').value.trim(), clear_key: !!S.biClear };
+  return b;
 }
 
 // ══ EVENTS ══════════════════════════════════════════════════
@@ -3231,6 +3409,7 @@ document.addEventListener('click', async (e) => {
     const k = segB.dataset.seg, v = segB.dataset.val;
     if (k === 'range') { S.ranges[S.view] = v; go(S.view); }
     if (k === 'top') { S.topTab = v; render(true); }
+    if (k === 'aiscope') { try { await post('ai_scope', { scope: v }); load(true); } catch (err) { toast(err.message, true); } }
     return;
   }
   const tab = t.closest('[data-tab]');
@@ -3275,6 +3454,12 @@ document.addEventListener('click', async (e) => {
     if (a === 'add-unpriced') { $('#price-rows').insertAdjacentHTML('beforeend', priceRows(S.data.unpriced.map((x) => ({ model: x.model, provider: x.provider, in: 0, cached: 0, out: 0 })))); toast('Added — fill in the prices and save'); return; }
     if (a === 'add-fx') { $('#fx-rows').insertAdjacentHTML('beforeend', fxRow('', '')); $('#fx-rows tr:last-child input').focus(); return; }
     if (a === 'del-row') { act.closest('tr').remove(); return; }
+    if (a === 'bi-toggle') { act.setAttribute('aria-checked', act.getAttribute('aria-checked') === 'true' ? 'false' : 'true'); return; }
+    if (a === 'bi-clear') {
+      if (!await ask({ title: 'Remove the built-in AI key?', body: 'The built-in AI is turned off when you save. Accounts that chose it go back to their own keys, if they have any.', ok: 'Remove', danger: true })) return;
+      S.biClear = true; $('#bi-on').setAttribute('aria-checked', 'false'); act.disabled = true; toast('Key will be removed when you save');
+      return;
+    }
     if (a === 'save-settings') {
       try { const b = collectSettings(); await post('settings_save', b); S.refresh = Math.max(5, +b.refresh || 15); restartTimer(); toast('Settings saved'); load(); } catch (err) { toast(err.message, true); }
       return;
@@ -3291,6 +3476,10 @@ $('#scrim').addEventListener('click', closeDrawer);
 $('#ai-pause').addEventListener('click', (e) => { e.stopPropagation(); toggleAi(e.currentTarget.getAttribute('aria-checked') !== 'true'); });
 $('#live').addEventListener('click', () => { S.live = !S.live; tickLive(); if (S.live) refreshLive(); });
 $('#menu').addEventListener('click', () => $('#side').classList.toggle('on'));
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'bi-prov' && S.set) { $('#bi-model').innerHTML = biModelOptions(S.set.prices, e.target.value, ''); $('#bi-price').textContent = biPriceText(S.set.prices, $('#bi-model').value); }
+  if (e.target.id === 'bi-model' && S.set) $('#bi-price').textContent = biPriceText(S.set.prices, e.target.value);
+});
 let qT = null;
 document.addEventListener('input', (e) => {
   const id = e.target.id;

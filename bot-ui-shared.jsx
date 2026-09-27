@@ -4135,6 +4135,14 @@ const AnthropicIcon = ({s=14,style={}}) => (
   </svg>
 );
 
+// Built-in AI (the site's own key, offered by the administrator): a spark.
+const BuiltinAiIcon = ({s=14,style={}}) => (
+  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" style={{flexShrink:0,...style}}>
+    <path d="M12 2.5l2.2 6.1 6.3 2.4-6.3 2.4L12 19.5l-2.2-6.1L3.5 11l6.3-2.4L12 2.5z" fill="#a78bfa"/>
+    <path d="M19 15.5l.9 2.2 2.1.8-2.1.8-.9 2.2-.9-2.2-2.1-.8 2.1-.8.9-2.2z" fill="#c4b5fd"/>
+  </svg>
+);
+
 // ── TopLayer — render straight into <body> ───────────────────────
 // Everything React draws lives inside .app, which is position:relative
 // with z-index:1. That makes .app one layer at the page root, so a z-index
@@ -8527,7 +8535,10 @@ const ghostSugContext = () => {
   const agents = arr(AGENTS_STORE.list).filter(a => a && String(a.name || '').trim());
   const active = agents.filter(a => a.active !== false);
   const cv = CRED_STORE.values || {};
-  const hasKey = ['llm_gemini', 'llm_openai', 'llm_claude'].some(k => String(cv[k] || '').trim());
+  // A key of their own, or the built-in AI chosen (and still offered).
+  const biCat = typeof LLM_CATALOG !== 'undefined' ? LLM_CATALOG.v : null;
+  const hasKey = ['llm_gemini', 'llm_openai', 'llm_claude'].some(k => String(cv[k] || '').trim())
+    || (cv.llm_active === 'builtin' && (!biCat || !!(biCat.builtin && biCat.builtin.available)));
   const products = arr(PRODS_STORE.list).filter(p => p && String(p.name || '').trim() && p.enabledForAi !== false);
   const prods = products.filter(p => !p.type || p.type === 'prod');
   const pkgs = arr(PRODS_STORE.list).filter(p => p && p.type === 'pkg');

@@ -1,0 +1,2293 @@
+/* ─────────────────────────────────────────────────────────────
+   bot-ui-widgets.css
+   Free-placement post-it style widget board. Widgets are absolutely
+   positioned, draggable by their header, resizable down to a minimum
+   from a fixed default size (cannot grow past default).
+   Muted, dim, low-saturation palette throughout — no bright colors.
+   ───────────────────────────────────────────────────────────── */
+
+:root {
+  --bcw-mono: ui-monospace, SFMono-Regular, Menlo, "JetBrains Mono", monospace;
+
+  /* Muted glass surface — dimmer than before */
+  --bcw-bg:        rgba(14,15,22,0.66);
+  --bcw-bg-strong: rgba(10,11,18,0.86);
+
+  /* Hairlines & strokes — softer */
+  --bcw-stroke:     rgba(255,255,255,0.055);
+  --bcw-stroke-soft:rgba(255,255,255,0.030);
+  --bcw-stroke-hi:  rgba(255,255,255,0.090);
+
+  /* Text — low-contrast, dim */
+  --bcw-t1: rgba(225,227,235,0.86);
+  --bcw-t2: rgba(180,184,200,0.62);
+  --bcw-t3: rgba(150,154,170,0.45);
+  --bcw-t4: rgba(120,124,140,0.32);
+
+  /* Muted accents — desaturated, dimmed. Single low-chroma indigo. */
+  --bcw-acc:     rgba(150,148,200,0.58);   /* dim indigo for primary accent strokes */
+  --bcw-acc-bg:  rgba(140,138,190,0.10);   /* very faint fill */
+
+  /* Muted semantic dots — desaturated */
+  --bcw-ok:    rgba(140,180,140,0.75);
+  --bcw-warn:  rgba(195,170,120,0.75);
+  --bcw-err:   rgba(200,135,125,0.75);
+  --bcw-info:  rgba(140,170,195,0.75);
+
+  --bcw-shadow: 0 14px 38px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.30);
+  --bcw-inset:  inset 0 0.5px 0 rgba(255,255,255,0.04), inset 0 -0.5px 0 rgba(0,0,0,0.35);
+}
+
+/* ── HIDE-IN-CHAT ─────────────────────────────────────────────
+   When the user opens an in-page chat the BcwOverlayMount sets
+   data-bcw-hidden="1" on <body>. We keep the dashboard MOUNTED
+   (so widget state, the ghost rig and the composer's session/idb
+   state aren't torn down) but visually suppress every layer it
+   owns so nothing bleeds through onto the chat surface:
+     • .bcw-board           → widget canvas (fixed, z=2400)
+     • .bcw-composer-layer  → ghost composer overlay (fixed, z=8500)
+     • .bcw-launch-btn      → "widgets" launcher chip
+     • .bcw-edit-panel      → edit-mode side panel (if it was open)
+   display:none drops them from the paint tree entirely so they
+   can't intercept clicks, render, or affect layout. The ghost
+   WebGL canvases live inside <EmptyChatAvatar> which unmounts on
+   chat-open already, so they don't need a rule here.            */
+body[data-bcw-hidden="1"] .bcw-board,
+body[data-bcw-hidden="1"] .bcw-composer-layer,
+body[data-bcw-hidden="1"] .bcw-launch-btn,
+body[data-bcw-hidden="1"] .bcw-edit-panel {
+  display: none !important;
+}
+
+/* ── BOARD (post-it style canvas) ────────────────────────────
+   Full free-positioning area. Ghost reserve is just a non-interactive
+   anchor in the top-left so the ghost has a docking zone. Widgets
+   absolutely position themselves via inline left/top.                */
+.bcw-board {
+  position: fixed;
+  top: 56px;
+  bottom: 10px;
+  left: var(--bcw-left, 320px);
+  right: 0;
+  z-index: 2400;
+  pointer-events: none;
+  overflow: hidden;
+  isolation: isolate;
+  /* This whole board is placeholder/demo content (see "DUMMY DATA" in
+     bot-ui-widgets.jsx) rendered as draggable post-it style cards, not
+     real copyable text — selecting it while dragging a card looked like
+     a bug. Inputs/textareas are unaffected; this never applies to them. */
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+}
+
+/* Editing mode: faint grid backdrop hint to indicate placement freedom */
+.bcw-board[data-bcw-edit="1"]::before {
+  content: '';
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(255,255,255,0.045) 1px, transparent 1.4px);
+  background-size: 28px 28px;
+  background-position: 14px 14px;
+  opacity: 0.85;
+  animation: bcw-board-fade 280ms ease-out;
+}
+@keyframes bcw-board-fade { from { opacity: 0; } to { opacity: 0.85; } }
+
+/* ── GHOST RESERVE — labelled spot the WebGL ghost docks into ──
+   Two modes, derived from layout state:
+     • data-bcw-mode="centered"  — board is empty (layout.length === 0).
+       Ghost sits in the visual centre of the board so the empty
+       dashboard reads as a friendly command surface.
+     • data-bcw-mode="docked"    — at least one widget is present.
+       Ghost recedes to the top-left so it's out of the way of widgets.
+   Mode lives on .bcw-board (set by WidgetDashboardOverlay). All
+   transitions are pure CSS so the ResizeObserver in MsgList just
+   re-reads the rect and updates the WebGL home position seamlessly. */
+.bcw-ghost-reserve {
+  position: absolute;
+  width: 280px; height: 300px;
+  pointer-events: none;
+  border-radius: 22px;
+  /* Smooth glide between centered and docked anchor positions.
+     The MsgList ResizeObserver fires when this transitions, so the
+     WebGL ghost world-space position eases along with the rect. */
+  transition:
+    left 480ms cubic-bezier(0.22, 1, 0.36, 1),
+    top  480ms cubic-bezier(0.22, 1, 0.36, 1),
+    width  480ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 480ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* Default (no mode set): docked, top-left.
+   Sizes hug the rendered ghost silhouette tightly so the composer can
+   anchor right under it without a visible gap. */
+.bcw-ghost-reserve,
+.bcw-board[data-bcw-mode="docked"] .bcw-ghost-reserve {
+  left: 12px;  top: 12px;
+  width: 220px; height: 210px;
+}
+/* Centered mode: anchor in the middle of the board.
+   The "ask the ghost" line that used to sit under the ghost is gone, so
+   the ghost is lowered by half of the space that line + its gap took up.
+   That keeps the ghost optically where the old ghost-plus-label group
+   was centred instead of leaving it floating high with nothing below. */
+.bcw-board[data-bcw-mode="centered"] .bcw-ghost-reserve {
+  left: 50%;
+  top: calc(35% + 40px);
+  width: 300px;
+  height: 310px;
+  transform: translate(-50%, -50%);
+}
+.bcw-board[data-bcw-edit="1"] .bcw-ghost-reserve {
+  border: 1px dashed rgba(150,148,200,0.30);
+  background:
+    radial-gradient(80% 80% at 50% 40%, rgba(150,148,200,0.05) 0%, transparent 70%);
+}
+.bcw-board[data-bcw-edit="1"] .bcw-ghost-reserve::after {
+  content: 'GHOST DOCKING';
+  position: absolute; bottom: 10px; left: 14px;
+  font: 700 9px/1 var(--bcw-mono);
+  letter-spacing: 0.22em;
+  color: rgba(150,148,200,0.55);
+}
+/* When ghost has been user-moved, the CSS reserve div no longer reflects
+   the ghost's actual position. Suppress the edit-mode outline + label so
+   it doesn't mislead; the ghost itself is still visible on screen. */
+.bcw-board[data-bcw-edit="1"][data-ghost-moved="1"] .bcw-ghost-reserve {
+  border-color: transparent;
+  background: none;
+}
+.bcw-board[data-bcw-edit="1"][data-ghost-moved="1"] .bcw-ghost-reserve::after {
+  content: 'GHOST (MOVED)';
+  opacity: 0.35;
+}
+
+/* ── COMPOSER LAYER — fixed-position overlay sibling of .bcw-board ──
+   The composer was previously a child of the board which meant CSS
+   `isolation: isolate` and `overflow: hidden` trapped its z-index and
+   could clip it. Lifting it to its own fixed layer guarantees:
+     • z-index 8500 places the composer ABOVE the ghost's near-plane
+       layer (z=8400) so floating text + reply bubble can never be
+       behind the ghost silhouette regardless of depth or scale.
+     • No clipping by the board's overflow:hidden — the bubble extends
+       freely above/below as needed.
+     • The composer still receives the same data-bcw-mode attribute so
+       all the centered/docked CSS rules continue to work.
+   pointer-events: none on the layer itself; children flip back to auto. */
+.bcw-composer-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 8500;
+}
+
+/* ── GHOST COMPOSER — minimalist morphic design ───────────────
+   Rebuilt to be invisible-by-default, premium, and to hug the rendered
+   ghost silhouette closely. The composer NEVER reads as a form input —
+   it's a faint hairline + floating text under the ghost.
+
+   Visual states (all share one DOM, morph between):
+
+     • IDLE      — barely-there: just a single ~80px hairline under
+                    the ghost. No background, no border, no shadow.
+                    A faint placeholder appears on hover/proximity.
+     • NEAR      — hairline brightens, placeholder fades in.
+     • LIVE      — typing / focused: hairline becomes a soft glow,
+                    text floats above it directly under the ghost.
+                    Text color shifts subtly with the typing-driven
+                    "mood" CSS var (--bcw-mood) so the composer feels
+                    alive rather than static.
+     • CONFIRM   — destructive verbs surface a compact confirm strip
+                    inline; this is the ONE state where chrome is
+                    intentional, because it must be unmissable.
+   ───────────────────────────────────────────────────────────── */
+
+/* Mood ring — JS sets --bcw-mood-hue/sat/light from the typing classifier.
+   The underline glow + placeholder + caret tint pull from these vars so
+   the composer breathes with the user's input rather than being static.
+   Set on .bcw-composer-layer (the parent fixed layer) so all composer
+   children can read them. */
+.bcw-composer-layer {
+  --bcw-mood-hue:   250;     /* default indigo */
+  --bcw-mood-sat:    20%;
+  --bcw-mood-light:  68%;
+  --bcw-mood-alpha: 0.55;
+}
+
+.bcw-composer {
+  position: absolute;
+  pointer-events: none; /* parent — children flip this on when revealed */
+  /* z-index inside .bcw-composer-layer is irrelevant since the layer
+     itself sits above the ghost. Local stacking handled by the bubble. */
+  /* Width morphs with content via --bcw-live-w. Idle is narrow; live
+     grows up to a viewport-relative cap so very wide screens can
+     accommodate longer thoughts without overflowing. */
+  width: clamp(160px, 22vw, 240px);
+  max-width: min(720px, 78vw);
+  transform: translateX(-50%);
+  /* Position is driven by rAF in JS for frame-by-frame ghost following
+     in viewport-absolute coordinates (composer-layer is fixed). Only
+     animate width + opacity here; transitioning left/top would fight
+     the rAF updates. */
+  transition:
+    width 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 240ms ease;
+  /* Off-screen until first rAF tick paints — prevents a flash at (0,0). */
+  left: -9999px;
+  top:  -9999px;
+}
+/* Docked-mode width hint — JS still drives position. */
+.bcw-composer-layer[data-bcw-mode="docked"] .bcw-composer {
+  width: clamp(180px, 18vw, 240px);
+}
+
+/* LIVE-mode width: when the user is typing / engaged, expand to fit the
+   floating text. JS measures and sets --bcw-live-w. */
+.bcw-composer[data-bcw-live="1"] {
+  width: var(--bcw-live-w, clamp(280px, 32vw, 420px));
+}
+
+/* The shell is the morph container. In all states it is fully transparent
+   — no background, no border, no shadow, no backdrop blur. Premium look
+   comes from the absence of chrome. */
+.bcw-composer-shell {
+  position: relative;
+  pointer-events: auto;
+  height: 28px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-radius: 0;
+  transition:
+    height 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Soft hairline under the input — the ONE visible mark. Drawn on ::after
+   so the shell stays clean. Color picks up the mood ring. Idle =
+   barely-there; near = brighter; live + focused = glowing. */
+.bcw-composer-shell::after {
+  content: '';
+  position: absolute;
+  left: 12%; right: 12%;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), 0.18) 30%,
+    hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), 0.30) 50%,
+    hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), 0.18) 70%,
+    transparent 100%);
+  opacity: 0;
+  filter: blur(0.2px);
+  pointer-events: none;
+  transition: opacity 240ms ease, background 320ms ease, filter 240ms ease;
+}
+.bcw-composer-layer[data-bcw-mode="centered"] .bcw-composer-shell::after { opacity: 0.55; }
+.bcw-composer[data-bcw-state="near"] .bcw-composer-shell::after { opacity: 0.85; }
+.bcw-composer[data-bcw-state="focused"] .bcw-composer-shell::after,
+.bcw-composer[data-bcw-state="sending"] .bcw-composer-shell::after {
+  opacity: 1;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), var(--bcw-mood-alpha)) 30%,
+    hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), calc(var(--bcw-mood-alpha) + 0.20)) 50%,
+    hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), var(--bcw-mood-alpha)) 70%,
+    transparent 100%);
+  filter: blur(0.4px);
+}
+.bcw-composer[data-bcw-state="success"] .bcw-composer-shell::after {
+  opacity: 1;
+  background: linear-gradient(90deg, transparent, var(--bcw-ok), transparent);
+}
+.bcw-composer[data-bcw-state="error"] .bcw-composer-shell::after {
+  opacity: 1;
+  background: linear-gradient(90deg, transparent, var(--bcw-err), transparent);
+}
+
+/* ── PREMIUM SENDING SHIMMER ─────────────────────────────────
+   While the ghost is round-tripping to the LLM (or relaying a batch
+   of messages through .NET), we paint a slow travelling highlight
+   on the hairline. It's deliberately understated — short bright
+   peak, long quiet stretch — so the dashboard doesn't feel like a
+   loading screen. The animation is paused when reduced-motion is on
+   (handled via the existing prefers-reduced-motion block below).
+
+   Implementation note: layered on TOP of the already-mood-tinted
+   ::after via a sibling ::before, so it inherits the same width
+   inset (12% / 12%) without fighting the existing background. */
+.bcw-composer-shell::before {
+  content: '';
+  position: absolute;
+  left: 12%; right: 12%;
+  bottom: 0;
+  height: 1px;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    transparent 35%,
+    hsla(var(--bcw-mood-hue), calc(var(--bcw-mood-sat) + 30%), calc(var(--bcw-mood-light) + 14%), 0.95) 50%,
+    transparent 65%,
+    transparent 100%);
+  background-size: 220% 100%;
+  background-position: -110% 0;
+  filter: blur(0.4px);
+  transition: opacity 240ms ease;
+}
+.bcw-composer[data-bcw-state="sending"] .bcw-composer-shell::before {
+  opacity: 1;
+  animation: bcw-shimmer-travel 1.85s cubic-bezier(0.55, 0.1, 0.45, 0.9) infinite;
+}
+@keyframes bcw-shimmer-travel {
+  0%   { background-position: -110% 0; }
+  60%  { background-position:  110% 0; }
+  100% { background-position:  110% 0; }   /* hold off-screen briefly between sweeps */
+}
+
+/* No box-shadow on the shell while sending — the shimmer hairline is the
+   only loading indicator; a box glow around the shell breaks the minimal look. */
+
+/* Pulsing dot prefix on the reply chip when it's showing a persistent
+   "working…" status. JS toggles data-pulse="1" on the chip when the
+   message represents in-flight work; we render a single dot that
+   breathes in tandem with the shimmer for visual coherence. */
+.bcw-composer-reply[data-pulse="1"]::before {
+  content: '';
+  display: inline-block;
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: 1px;
+  background: hsla(var(--bcw-mood-hue), calc(var(--bcw-mood-sat) + 20%), calc(var(--bcw-mood-light) + 4%), 0.85);
+  box-shadow: 0 0 6px hsla(var(--bcw-mood-hue), calc(var(--bcw-mood-sat) + 30%), calc(var(--bcw-mood-light) + 8%), 0.55);
+  animation: bcw-pulse-dot 1.85s cubic-bezier(0.4, 0, 0.4, 1) infinite;
+}
+@keyframes bcw-pulse-dot {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); }
+  50%      { opacity: 1.00; transform: scale(1.05); }
+}
+
+/* LIVE-mode: shell grows slightly to give the floating text breathing
+   room above the hairline. */
+.bcw-composer[data-bcw-live="1"] .bcw-composer-shell {
+  height: 36px;
+}
+
+/* Old SVG silhouette is no longer used — kept zeroed for back-compat. */
+.bcw-composer-svg { display: none; }
+
+/* The input row sits inside the shell, centered. Mask gradient on the
+   right edge prevents long unbroken text from hitting the boundary. */
+.bcw-composer-row {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 10px;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
+}
+.bcw-composer[data-bcw-live="1"] .bcw-composer-row {
+  padding: 0 4px;
+  justify-content: center;
+}
+
+.bcw-composer-input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  caret-color: hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), 0.85);
+  color: var(--bcw-t3);
+  font: 400 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+  letter-spacing: -0.003em;
+  padding: 4px 0;
+  text-align: center;
+  transition: font-size 220ms ease, color 220ms ease, font-weight 220ms ease, opacity 220ms ease;
+}
+/* The board's composer is a trigger now, not a field. It keeps the input's
+   typography exactly — it should still read as an invitation to type, not
+   as a button bolted under the ghost — and only gains a pointer and the
+   dimming the placeholder used to carry. */
+.bcw-composer-input[data-trigger="1"] {
+  cursor: text;
+  opacity: 0.62;
+  font-family: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bcw-composer-input[data-trigger="1"]:hover,
+.bcw-composer[data-bcw-state="near"]    .bcw-composer-input[data-trigger="1"],
+.bcw-composer[data-bcw-state="focused"] .bcw-composer-input[data-trigger="1"] {
+  opacity: 1;
+  color: var(--bcw-t2);
+}
+.bcw-composer-input[data-trigger="1"]:focus-visible {
+  outline: 1px solid hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), 0.5);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+/* Live-mode input: bigger, brighter — reads as the user's thought
+   floating directly under the ghost. Color picks up the mood. */
+.bcw-composer[data-bcw-live="1"] .bcw-composer-input {
+  color: hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), calc(var(--bcw-mood-light) + 18%), 0.95);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.006em;
+  padding: 5px 0;
+}
+.bcw-composer-input::placeholder {
+  color: var(--bcw-t4);
+  font-style: normal;
+  transition: color 220ms ease, opacity 220ms ease;
+  opacity: 0;
+}
+/* Placeholder reveals on hover/proximity, NEVER in idle alone, so the
+   default state is silent and minimal. */
+.bcw-composer-layer[data-bcw-mode="centered"] .bcw-composer-input::placeholder { opacity: 0.5; }
+.bcw-composer[data-bcw-state="near"]    .bcw-composer-input::placeholder { opacity: 0.85; }
+.bcw-composer[data-bcw-state="focused"] .bcw-composer-input::placeholder { opacity: 0.6; }
+.bcw-composer-input::selection {
+  background: hsla(var(--bcw-mood-hue), var(--bcw-mood-sat), var(--bcw-mood-light), 0.30);
+}
+
+/* ↵ pill removed entirely — the caret is the only chrome.
+   Kept the class so JSX doesn't break, but display is none.
+   During 'sending' state the … indicator is shown. */
+.bcw-composer-key { display: none; }
+.bcw-composer[data-sending="1"] .bcw-composer-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--t3, rgba(255,255,255,0.45));
+  animation: bcw-key-pulse 0.9s ease-in-out infinite alternate;
+  min-width: 18px;
+  flex-shrink: 0;
+}
+@keyframes bcw-key-pulse {
+  from { opacity: 0.35; }
+  to   { opacity: 0.9; }
+}
+/* Visually dim the input while sending so it's clear it's locked */
+.bcw-composer[data-sending="1"] .bcw-composer-input {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Reply chip — the ghost's last spoken line. Positioned BELOW the input
+   (not above) so it never overlaps the ghost silhouette regardless of
+   the ghost's depth/scale. Inline italic text, no card. */
+.bcw-composer-reply {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 6px);
+  bottom: auto;
+  transform: translateX(-50%) translateY(-4px);
+  max-width: min(560px, 80vw);
+  padding: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 0;
+  font: 400 12.5px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+  font-style: italic;
+  color: hsla(var(--bcw-mood-hue), 12%, calc(var(--bcw-mood-light) + 12%), 0.90);
+  text-align: center;
+  white-space: pre-wrap;
+  pointer-events: none;
+  opacity: 0;
+  /* Above the ghost's near layer (z=8400) so the bubble always reads
+     clearly even when the ghost drifts over its anchor point. */
+  z-index: 8500;
+  transition:
+    opacity 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.bcw-composer-reply[data-show="1"] {
+  opacity: 0.95;
+  transform: translateX(-50%) translateY(0);
+}
+.bcw-composer-reply[data-kind="err"] { color: var(--bcw-err); }
+.bcw-composer-reply[data-kind="ok"]  { color: var(--bcw-ok);  }
+
+/* Hint chip — first-hover only. Hidden by default. JS removes it after
+   first interaction so the dashboard isn't decorated with rotating tips. */
+.bcw-composer-hint {
+  margin-top: 8px;
+  text-align: center;
+  font: 500 9px/1.3 var(--bcw-mono);
+  letter-spacing: 0.10em;
+  color: var(--bcw-t4);
+  pointer-events: none;
+  text-transform: uppercase;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.bcw-composer-layer[data-bcw-mode="centered"] .bcw-composer[data-bcw-state="near"] .bcw-composer-hint[data-once-shown="0"] {
+  opacity: 0.55;
+}
+.bcw-composer[data-bcw-live="1"] .bcw-composer-hint { opacity: 0 !important; }
+
+/* Reveal logic — composer is invisible in idle docked mode; in centered
+   mode (empty board) it shows a faint hairline so the user sees the
+   command surface exists. Cursor proximity / focus reveal it fully. */
+.bcw-composer { opacity: 0; pointer-events: none; }
+.bcw-composer-layer[data-bcw-mode="centered"] .bcw-composer { opacity: 1; pointer-events: auto; }
+.bcw-composer[data-bcw-state="near"]    { opacity: 1; pointer-events: auto; }
+.bcw-composer[data-bcw-state="focused"] { opacity: 1; pointer-events: auto; }
+.bcw-composer[data-bcw-state="sending"] { opacity: 1; pointer-events: auto; }
+.bcw-composer[data-bcw-state="success"] { opacity: 1; pointer-events: auto; }
+.bcw-composer[data-bcw-state="error"]   { opacity: 1; pointer-events: auto; }
+.bcw-composer[data-bcw-live="1"]        { opacity: 1; pointer-events: auto; }
+
+/* Drip dot removed — the hairline is the only visual anchor. */
+.bcw-composer-drip { display: none; }
+@keyframes bcw-drip-pulse { /* kept empty for back-compat */ }
+
+/* Confirm strip — destructive actions need to be unmissable, so this
+   is the ONE state with deliberate chrome. Compact, restrained. */
+.bcw-composer-confirm {
+  position: absolute;
+  inset: -2px -8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(20, 22, 34, 0.55);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 0.5px solid rgba(200, 135, 125, 0.30);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+.bcw-composer-confirm-text {
+  flex: 1;
+  font: 500 11.5px/1.35 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+  color: var(--bcw-t1);
+  min-width: 0;
+}
+.bcw-composer-confirm-sub {
+  font-size: 10px;
+  color: var(--bcw-t3);
+  margin-top: 2px;
+}
+.bcw-composer-btn {
+  flex-shrink: 0;
+  font: 600 9.5px/1 var(--bcw-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 5px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 0.5px solid var(--bcw-stroke-hi);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--bcw-t2);
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.bcw-composer-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--bcw-t1);
+}
+.bcw-composer-btn[data-primary="1"] {
+  background: var(--bcw-acc-bg);
+  border-color: var(--bcw-acc);
+  color: var(--bcw-t1);
+}
+.bcw-composer-btn[data-primary="1"]:hover {
+  background: rgba(150, 148, 200, 0.18);
+}
+.bcw-composer-btn[data-danger="1"] {
+  border-color: rgba(200, 135, 125, 0.40);
+  background: rgba(200, 135, 125, 0.10);
+  color: rgba(228, 200, 195, 0.90);
+}
+.bcw-composer-btn[data-danger="1"]:hover {
+  background: rgba(200, 135, 125, 0.18);
+}
+
+/* Status line is suppressed when the reply chip is showing (consolidates
+   feedback to one place). Otherwise inline below as a thin notice. */
+.bcw-composer-status {
+  margin-top: 6px;
+  text-align: center;
+  font: 500 10px/1.3 var(--bcw-mono);
+  letter-spacing: 0.06em;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.bcw-composer-status[data-show="1"] { opacity: 0.9; }
+.bcw-composer-status[data-kind="ok"]  { color: var(--bcw-ok);  }
+.bcw-composer-status[data-kind="err"] { color: var(--bcw-err); }
+.bcw-composer-status[data-kind="info"]{ color: var(--bcw-t3);  }
+
+/* Reduced motion — kill every transition the composer animates. */
+@media (prefers-reduced-motion: reduce) {
+  .bcw-composer,
+  .bcw-composer-shell,
+  .bcw-composer-shell::after,
+  .bcw-composer-shell::before,
+  .bcw-composer-input,
+  .bcw-composer-reply,
+  .bcw-composer-reply::before,
+  .bcw-composer-hint,
+  .bcw-composer-status { transition: none !important; animation: none !important; }
+  .bcw-composer[data-bcw-state="sending"] .bcw-composer-shell::before { opacity: 0.35; }
+}
+
+/* ── CARD (each widget — absolutely positioned post-it) ─────── */
+.bcw-card {
+  position: absolute;
+  pointer-events: auto;
+  background: var(--bcw-bg);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  border: 0.5px solid var(--bcw-stroke);
+  border-radius: 14px;
+  box-shadow: var(--bcw-inset), var(--bcw-shadow);
+  display: flex;
+  flex-direction: column;
+  color: var(--bcw-t1);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+  overflow: hidden;
+  animation: bcw-card-in 380ms cubic-bezier(0.22,1,0.36,1) both;
+  transition: box-shadow 0.18s, border-color 0.18s;
+}
+.bcw-card:hover {
+  border-color: var(--bcw-stroke-hi);
+}
+.bcw-card[data-dragging="1"] {
+  z-index: 30 !important;
+  cursor: grabbing;
+  box-shadow:
+    inset 0 0.5px 0 rgba(255,255,255,0.06),
+    0 28px 60px rgba(0,0,0,0.65),
+    0 4px 14px rgba(0,0,0,0.5);
+  border-color: rgba(150,148,200,0.30);
+}
+.bcw-card[data-resizing="1"] { z-index: 30; }
+@keyframes bcw-card-in {
+  from { opacity:0; transform: translateY(-6px) scale(0.99); }
+  to   { opacity:1; transform: none; }
+}
+.bcw-card.bcw-editing { animation: bcw-jiggle 0.7s ease-in-out infinite alternate; }
+@keyframes bcw-jiggle {
+  from { transform: rotate(-0.25deg); }
+  to   { transform: rotate(0.25deg);  }
+}
+
+/* Subtle inner highlight on the card — single faint top-left bloom only */
+.bcw-card::before {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  background:
+    radial-gradient(140% 70% at 0% 0%, rgba(255,255,255,0.035) 0%, transparent 55%);
+  z-index: 0;
+}
+.bcw-head, .bcw-body { position: relative; z-index: 1; }
+
+/* Remove button — top-right, only visible in editing */
+.bcw-card-x {
+  position: absolute; top: -8px; right: -8px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: rgba(28,30,42,0.98);
+  border: 1px solid rgba(255,255,255,0.18);
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(225,227,235,0.85);
+  font-size: 13px; font-weight: 500;
+  cursor: pointer; z-index: 20; padding: 0;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.55);
+  animation: bcw-x-in 200ms ease-out both;
+}
+@keyframes bcw-x-in {
+  from { opacity:0; transform: scale(0.6); }
+  to   { opacity:1; transform: none; }
+}
+.bcw-card-x:hover {
+  background: rgba(200,135,125,0.18);
+  border-color: rgba(200,135,125,0.4);
+}
+
+/* ── HEAD (also serves as drag handle) ─────────────────────── */
+.bcw-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 7px;
+  flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+  border-bottom: 0.5px solid var(--bcw-stroke-soft);
+}
+.bcw-card[data-dragging="1"] .bcw-head { cursor: grabbing; }
+.bcw-icon {
+  width: 20px; height: 20px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.035);
+  border: 0.5px solid var(--bcw-stroke);
+  color: var(--bcw-t2);
+  flex-shrink: 0;
+}
+.bcw-title {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.13em;
+  color: var(--bcw-t2);
+  text-transform: uppercase;
+}
+.bcw-spacer { flex: 1; }
+.bcw-meta {
+  font-size: 9px; font-family: var(--bcw-mono);
+  color: var(--bcw-t3);
+  letter-spacing: 0.04em;
+}
+.bcw-mini-btn {
+  width: 22px; height: 22px; border-radius: 6px; padding: 0;
+  background: transparent;
+  border: 0.5px solid transparent;
+  color: var(--bcw-t3);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; line-height: 1; cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.bcw-mini-btn:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: var(--bcw-stroke);
+  color: var(--bcw-t1);
+}
+
+.bcw-body {
+  flex: 1; min-height: 0; overflow: auto;
+  padding: 9px 12px 12px;
+  display: flex; flex-direction: column;
+  scrollbar-width: none;
+}
+.bcw-body::-webkit-scrollbar { display: none; }
+
+.bcw-dot {
+  display: inline-block;
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+}
+
+/* ── RESIZE HANDLE — bottom-right corner, real drag-resize ── */
+.bcw-resize-h {
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 18px; height: 18px;
+  cursor: nwse-resize;
+  z-index: 5;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+}
+.bcw-card:hover .bcw-resize-h { opacity: 0.8; }
+.bcw-resize-h::before {
+  content: '';
+  position: absolute;
+  right: 4px; bottom: 4px;
+  width: 8px; height: 8px;
+  border-right: 1.5px solid rgba(180,184,200,0.55);
+  border-bottom: 1.5px solid rgba(180,184,200,0.55);
+  border-bottom-right-radius: 3px;
+}
+.bcw-resize-h:hover { opacity: 1; }
+
+/* ── SHARED ROW (avatar + name + sub + time) ───────────────── */
+.bcw-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 0;
+  border-bottom: 0.5px solid var(--bcw-stroke-soft);
+}
+.bcw-row:last-child { border-bottom: none; }
+.bcw-ava {
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 600; color: rgba(255,255,255,0.85);
+  border: 0.5px solid rgba(255,255,255,0.06);
+  /* Muted gradient applied inline — alpha ~0.4 */
+}
+.bcw-row-main { flex: 1; min-width: 0; }
+.bcw-row-name {
+  font-size: 11px; font-weight: 500; color: var(--bcw-t1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bcw-row-sub {
+  font-size: 10px; color: var(--bcw-t3); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bcw-row-time {
+  font-size: 9.5px; font-family: var(--bcw-mono);
+  color: var(--bcw-t4); flex-shrink: 0;
+}
+
+/* ── INBOX (unified messages list) ─────────────────────────── */
+.bcw-inbox-tabs {
+  display: flex; gap: 4px;
+  padding: 0 0 8px;
+  flex-shrink: 0;
+}
+.bcw-inbox-tab {
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--bcw-t3);
+  padding: 4px 8px; border-radius: 5px;
+  font-family: var(--bcw-mono); text-transform: uppercase;
+  cursor: pointer;
+  border: 0.5px solid transparent;
+  background: transparent;
+}
+.bcw-inbox-tab.on {
+  color: var(--bcw-t1);
+  background: rgba(255,255,255,0.04);
+  border-color: var(--bcw-stroke);
+}
+.bcw-inbox-tab .bcw-tab-count {
+  margin-left: 5px;
+  color: var(--bcw-t4);
+  font-size: 8.5px;
+}
+
+/* ── PIPELINE (kanban-ish stages) ──────────────────────────── */
+.bcw-pipe {
+  display: flex; flex-direction: column; gap: 8px;
+  flex: 1;
+}
+.bcw-pipe-row {
+  display: flex; align-items: center; gap: 9px;
+}
+.bcw-pipe-name {
+  width: 76px; flex-shrink: 0;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.10em;
+  color: var(--bcw-t2); text-transform: uppercase;
+  font-family: var(--bcw-mono);
+}
+.bcw-pipe-bar {
+  flex: 1; height: 6px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 0.5px solid var(--bcw-stroke-soft);
+}
+.bcw-pipe-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.bcw-pipe-val {
+  width: 64px; text-align: right; flex-shrink: 0;
+  font-size: 10px; font-family: var(--bcw-mono);
+  color: var(--bcw-t2);
+  letter-spacing: 0.02em;
+}
+.bcw-pipe-count {
+  width: 24px; text-align: right; flex-shrink: 0;
+  font-size: 9.5px; font-family: var(--bcw-mono);
+  color: var(--bcw-t4);
+}
+
+/* ── REVENUE LINE (chart + values) ─────────────────────────── */
+.bcw-rev-head {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-bottom: 8px;
+}
+.bcw-rev-total {
+  font-size: 22px; font-weight: 500; font-family: var(--bcw-mono);
+  letter-spacing: -0.02em; line-height: 1;
+  color: var(--bcw-t1);
+}
+.bcw-rev-delta {
+  font-size: 10px; font-family: var(--bcw-mono);
+  color: var(--bcw-ok);
+}
+.bcw-rev-delta[data-neg="1"] { color: var(--bcw-err); }
+.bcw-rev-sub {
+  font-size: 9.5px; color: var(--bcw-t4);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  font-family: var(--bcw-mono);
+  margin-bottom: 6px;
+}
+
+/* ── ASSISTANT STATUS ──────────────────────────────────────── */
+.bcw-as-grid {
+  display: grid; gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+.bcw-as-cell {
+  background: rgba(255,255,255,0.022);
+  border: 0.5px solid var(--bcw-stroke-soft);
+  border-radius: 8px;
+  padding: 8px 9px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.bcw-as-label {
+  font-size: 8.5px; font-weight: 700; letter-spacing: 0.10em;
+  color: var(--bcw-t3); text-transform: uppercase;
+  font-family: var(--bcw-mono);
+}
+.bcw-as-val {
+  font-size: 14px; font-weight: 500; font-family: var(--bcw-mono);
+  color: var(--bcw-t1);
+  letter-spacing: -0.01em; line-height: 1;
+}
+.bcw-as-meta {
+  font-size: 9px; color: var(--bcw-t4);
+  font-family: var(--bcw-mono);
+}
+
+/* ── FEED (replacing social) ───────────────────────────────── */
+.bcw-feed-item {
+  padding: 7px 0;
+  border-bottom: 0.5px solid var(--bcw-stroke-soft);
+}
+.bcw-feed-item:last-child { border-bottom: none; }
+.bcw-feed-head {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
+}
+.bcw-feed-name {
+  font-size: 10.5px; font-weight: 600; color: var(--bcw-t1);
+}
+.bcw-feed-handle {
+  font-size: 9.5px; color: var(--bcw-t4); font-family: var(--bcw-mono);
+}
+.bcw-feed-body {
+  font-size: 11px; color: var(--bcw-t2); line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── CONTACTS GRID (avatar tile) ───────────────────────────── */
+.bcw-contact-grid {
+  display: grid; gap: 8px;
+  flex: 1; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+}
+.bcw-contact-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 8px 4px; border-radius: 9px;
+  background: rgba(255,255,255,0.018);
+  border: 0.5px solid var(--bcw-stroke-soft);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.bcw-contact-cell:hover {
+  background: rgba(255,255,255,0.04);
+  border-color: var(--bcw-stroke);
+}
+.bcw-contact-name {
+  font-size: 9.5px; color: var(--bcw-t2); font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+
+/* ── CRYPTO ─────────────────────────────────────────────────── */
+.bcw-crypto-total {
+  font-size: 22px; font-weight: 500; font-family: var(--bcw-mono);
+  letter-spacing: -0.02em; line-height: 1; color: var(--bcw-t1);
+}
+.bcw-crypto-sub {
+  font-size: 9.5px; color: var(--bcw-t3);
+  margin-top: 4px; font-family: var(--bcw-mono);
+  letter-spacing: 0.02em;
+}
+.bcw-crypto-stack {
+  display: flex; height: 5px; border-radius: 2.5px;
+  overflow: hidden; margin: 8px 0;
+  background: rgba(255,255,255,0.03);
+  border: 0.5px solid var(--bcw-stroke-soft);
+}
+.bcw-crypto-stack-seg { height: 100%; }
+.bcw-crypto-stack-legend {
+  display: flex; flex-wrap: wrap; gap: 7px 12px;
+  font-size: 9.5px; font-family: var(--bcw-mono);
+  color: var(--bcw-t3);
+  letter-spacing: 0.02em;
+}
+.bcw-crypto-stack-legend > span {
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.bcw-asset-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px;
+  font-size: 9px; font-weight: 600;
+  font-family: var(--bcw-mono);
+  letter-spacing: 0.06em;
+  border-radius: 4px;
+  border: 0.5px solid var(--bcw-stroke);
+  background: rgba(255,255,255,0.025);
+  color: var(--bcw-t2);
+  flex-shrink: 0;
+  width: 50px;
+  justify-content: center;
+}
+
+/* ── TASKS (todo list) ─────────────────────────────────────── */
+.bcw-task {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 7px 0;
+  border-bottom: 0.5px solid var(--bcw-stroke-soft);
+  cursor: pointer;
+}
+.bcw-task:last-child { border-bottom: none; }
+.bcw-task-check {
+  width: 13px; height: 13px;
+  border-radius: 4px;
+  border: 1px solid var(--bcw-stroke-hi);
+  background: rgba(255,255,255,0.025);
+  flex-shrink: 0; margin-top: 1px;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.14s, border-color 0.14s;
+}
+.bcw-task[data-done="1"] .bcw-task-check {
+  background: rgba(150,148,200,0.18);
+  border-color: rgba(150,148,200,0.45);
+}
+.bcw-task[data-done="1"] .bcw-task-check::after {
+  content: '';
+  width: 7px; height: 4px;
+  border-left: 1.5px solid rgba(225,227,235,0.85);
+  border-bottom: 1.5px solid rgba(225,227,235,0.85);
+  transform: rotate(-45deg) translate(0.5px, -0.5px);
+}
+.bcw-task-text {
+  flex: 1; min-width: 0;
+  font-size: 11px; color: var(--bcw-t1);
+  line-height: 1.4;
+  letter-spacing: -0.005em;
+}
+.bcw-task[data-done="1"] .bcw-task-text {
+  color: var(--bcw-t4);
+  text-decoration: line-through;
+  text-decoration-color: var(--bcw-t4);
+}
+.bcw-task-tag {
+  font-size: 9px; font-family: var(--bcw-mono);
+  color: var(--bcw-t4);
+  letter-spacing: 0.04em;
+  padding: 1px 6px; border-radius: 3px;
+  background: rgba(255,255,255,0.03);
+  border: 0.5px solid var(--bcw-stroke-soft);
+  flex-shrink: 0; margin-top: 1px;
+}
+
+/* ── CALENDAR (agenda) ─────────────────────────────────────── */
+.bcw-cal-event {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 7px 0;
+  border-bottom: 0.5px solid var(--bcw-stroke-soft);
+}
+.bcw-cal-event:last-child { border-bottom: none; }
+.bcw-cal-time { width: 42px; flex-shrink: 0; }
+.bcw-cal-time-h {
+  font-size: 11px; font-weight: 600; font-family: var(--bcw-mono);
+  color: var(--bcw-t1);
+}
+.bcw-cal-time-m {
+  font-size: 9px; color: var(--bcw-t4); letter-spacing: 0.05em;
+  font-family: var(--bcw-mono);
+}
+.bcw-cal-bar {
+  width: 2px; align-self: stretch;
+  border-radius: 1px; flex-shrink: 0; margin-top: 4px;
+  background: rgba(150,148,200,0.45);
+}
+.bcw-cal-main { flex: 1; min-width: 0; }
+.bcw-cal-title {
+  font-size: 11px; font-weight: 500; color: var(--bcw-t1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bcw-cal-sub {
+  font-size: 9.5px; color: var(--bcw-t3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── CLOCK ─────────────────────────────────────────────────── */
+.bcw-clock-time {
+  font-weight: 200; font-family: var(--bcw-mono);
+  color: var(--bcw-t1);
+  letter-spacing: -0.04em; line-height: 1;
+  margin: auto 0 6px;
+  font-size: 38px;
+}
+.bcw-clock-date {
+  font-size: 9.5px; color: var(--bcw-t3);
+  letter-spacing: 0.07em; text-transform: uppercase;
+  font-weight: 600; font-family: var(--bcw-mono);
+}
+
+/* ── WEATHER ───────────────────────────────────────────────── */
+.bcw-weather-temp {
+  font-weight: 200; font-family: var(--bcw-mono);
+  letter-spacing: -0.03em; line-height: 1;
+  color: var(--bcw-t1);
+  margin: auto 0 4px;
+  font-size: 30px;
+}
+.bcw-weather-desc {
+  font-size: 11px; color: var(--bcw-t2); font-weight: 500;
+}
+.bcw-weather-loc {
+  font-size: 9px; color: var(--bcw-t4); margin-top: 3px;
+  letter-spacing: 0.05em; text-transform: uppercase; font-weight: 600;
+  font-family: var(--bcw-mono);
+}
+.bcw-weather-strip {
+  display: flex; gap: 8px; margin-top: 8px;
+}
+.bcw-weather-hour {
+  flex: 1;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 5px 2px;
+  background: rgba(255,255,255,0.018);
+  border: 0.5px solid var(--bcw-stroke-soft);
+  border-radius: 6px;
+}
+.bcw-weather-hour-t {
+  font-size: 8.5px; font-family: var(--bcw-mono);
+  color: var(--bcw-t4); letter-spacing: 0.04em;
+}
+.bcw-weather-hour-v {
+  font-size: 10.5px; font-family: var(--bcw-mono);
+  color: var(--bcw-t1); font-weight: 500;
+}
+
+/* ── ACTIVITY HEATMAP ──────────────────────────────────────── */
+.bcw-heat {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 2px;
+  padding: 2px 0;
+}
+.bcw-heat-cell {
+  aspect-ratio: 1;
+  background: rgba(150,148,200,0.05);
+  border-radius: 1.5px;
+  border: 0.5px solid rgba(255,255,255,0.02);
+}
+
+/* ── EDIT PANEL ────────────────────────────────────────────── */
+.bcw-edit-panel {
+  position: fixed; top: 60px; right: 18px;
+  width: 320px; max-width: calc(100vw - 36px);
+  z-index: 9000;
+  background: var(--bcw-bg-strong);
+  backdrop-filter: blur(40px) saturate(160%);
+  -webkit-backdrop-filter: blur(40px) saturate(160%);
+  border: 0.5px solid var(--bcw-stroke-hi);
+  border-radius: 14px;
+  box-shadow: var(--bcw-inset), 0 24px 60px rgba(0,0,0,0.6);
+  overflow: hidden;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+  color: var(--bcw-t1);
+  animation: bcw-panel-in 220ms cubic-bezier(0.22,1,0.36,1) both;
+}
+@keyframes bcw-panel-in {
+  from { opacity:0; transform: translateY(6px) scale(0.98); }
+  to   { opacity:1; transform: none; }
+}
+.bcw-edit-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px 10px;
+  border-bottom: 0.5px solid var(--bcw-stroke);
+  color: var(--bcw-t2);
+}
+.bcw-edit-title {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.13em;
+  text-transform: uppercase;
+  flex: 1;
+}
+.bcw-edit-done {
+  font-size: 10px; font-weight: 600;
+  color: var(--bcw-t1);
+  letter-spacing: 0.06em; padding: 4px 10px;
+  background: rgba(255,255,255,0.05);
+  border: 0.5px solid var(--bcw-stroke-hi);
+  border-radius: 999px; cursor: pointer;
+  font-family: inherit;
+}
+.bcw-edit-done:hover { background: rgba(255,255,255,0.10); }
+.bcw-edit-list {
+  max-height: 60vh; overflow: auto; padding: 6px;
+  scrollbar-width: none;
+}
+.bcw-edit-list::-webkit-scrollbar { display: none; }
+.bcw-edit-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.bcw-edit-item:hover { background: rgba(255,255,255,0.035); }
+.bcw-edit-icon {
+  width: 30px; height: 30px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.03);
+  border: 0.5px solid var(--bcw-stroke);
+  flex-shrink: 0;
+  color: var(--bcw-t2);
+}
+.bcw-edit-text { flex: 1; min-width: 0; }
+.bcw-edit-name {
+  font-size: 11.5px; font-weight: 600; color: var(--bcw-t1);
+  letter-spacing: -0.005em;
+}
+.bcw-edit-desc {
+  font-size: 10px; color: var(--bcw-t3);
+  margin-top: 2px; line-height: 1.3;
+}
+.bcw-edit-tgl {
+  position: relative; width: 28px; height: 16px; flex-shrink: 0;
+  background: rgba(255,255,255,0.06);
+  border: 0.5px solid var(--bcw-stroke);
+  border-radius: 9px;
+  transition: background 0.18s, border-color 0.18s;
+}
+.bcw-edit-tgl::before {
+  content: ''; position: absolute; left: 1.5px; bottom: 1.5px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: rgba(255,255,255,0.55);
+  transition: 0.18s cubic-bezier(0.4,0,0.2,1);
+}
+.bcw-edit-tgl[data-on="1"] {
+  background: rgba(150,148,200,0.45);
+  border-color: rgba(150,148,200,0.40);
+}
+.bcw-edit-tgl[data-on="1"]::before {
+  transform: translateX(12px);
+  background: rgba(255,255,255,0.92);
+}
+.bcw-edit-foot {
+  padding: 9px 14px 11px;
+  border-top: 0.5px solid var(--bcw-stroke);
+  display: flex; gap: 8px; justify-content: space-between;
+  align-items: center;
+}
+.bcw-edit-mini {
+  font-size: 10px; color: var(--bcw-t3);
+  letter-spacing: 0.02em;
+  background: transparent; border: none; cursor: pointer;
+  padding: 0; font-family: inherit;
+}
+.bcw-edit-mini:hover { color: var(--bcw-t1); }
+
+/* ── LAUNCHER BUTTON ───────────────────────────────────────── */
+.bcw-launch-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 10px;
+  font-size: 10.5px; font-weight: 600;
+  font-family: var(--bcw-mono);
+  letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--bcw-t2);
+  background: rgba(18,20,32,0.55);
+  border: 1px solid var(--bcw-stroke-hi);
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.28);
+  transition: background 0.16s, color 0.16s, border-color 0.16s;
+}
+.bcw-launch-btn:hover {
+  color: var(--bcw-t1); border-color: rgba(255,255,255,0.16);
+  background: rgba(28,30,42,0.65);
+}
+.bcw-launch-btn[data-on="1"] {
+  background: rgba(150,148,200,0.14);
+  border-color: rgba(150,148,200,0.40);
+  color: rgba(225,227,235,0.95);
+}
+
+/* ── MINIMAL TICKER (unchanged behaviour, muted palette) ───── */
+.bcw-ticker {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  max-width: 520px;
+  background: var(--bcw-bg);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  border: 0.5px solid var(--bcw-stroke);
+  border-radius: 999px;
+  box-shadow: var(--bcw-inset), 0 8px 24px rgba(0,0,0,0.4);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+  color: var(--bcw-t1);
+  animation: bcw-ticker-in 700ms cubic-bezier(0.22,1,0.36,1) 200ms both;
+}
+@keyframes bcw-ticker-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.bcw-ticker-pulse {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--bcw-ok);
+  box-shadow: 0 0 6px rgba(140,180,140,0.45);
+  animation: bcw-ticker-pulse 2s ease-in-out infinite;
+}
+@keyframes bcw-ticker-pulse {
+  0%,100% { opacity: 0.55; transform: scale(1); }
+  50%     { opacity: 1;    transform: scale(1.25); }
+}
+.bcw-ticker-label {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.18em;
+  color: var(--bcw-t3);
+  text-transform: uppercase;
+  font-family: var(--bcw-mono);
+  flex-shrink: 0;
+}
+.bcw-ticker-divider {
+  width: 1px; height: 11px; background: var(--bcw-stroke); flex-shrink: 0;
+}
+.bcw-ticker-line {
+  font-size: 12px; font-weight: 400; color: var(--bcw-t2);
+  letter-spacing: 0.005em; line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: opacity 380ms ease;
+  max-width: 360px;
+}
+.bcw-ticker-time {
+  font-size: 10.5px; font-family: var(--bcw-mono);
+  color: var(--bcw-t3);
+  letter-spacing: 0.04em; flex-shrink: 0;
+}
+
+/* ── HEADER CHIPS (activity + money taken) ───────────────────
+   Their own control family, deliberately not the mono/uppercase
+   launcher pill: squared instrument geometry, Inter with tabular
+   figures, one 32px height shared by both so the pair sits level.
+     .bcw-chip-icon — 32x32 square, glyph only (activity)
+     .bcw-chip-read — a readout: glyph | rule | caption + figure | delta
+   Both use the same surface as a widget card so the cluster reads
+   as instrumentation belonging to the board.                      */
+.bcw-chip {
+  display: inline-flex; align-items: center;
+  height: 30px;
+  padding: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+  color: var(--bcw-t3);
+  background: rgba(14,16,26,0.44);
+  border: 1px solid rgba(255,255,255,0.045);
+  border-radius: 9px;
+  cursor: pointer;
+  position: relative;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  transition: background 0.16s, border-color 0.16s, color 0.16s;
+}
+.bcw-chip:hover {
+  color: var(--bcw-t1);
+  background: rgba(22,24,38,0.7);
+  border-color: rgba(255,255,255,0.10);
+}
+.bcw-chip[data-on="1"] {
+  background: rgba(26,27,45,0.82);
+  border-color: rgba(150,148,200,0.30);
+  color: rgba(222,224,238,0.94);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.24);
+}
+
+/* Square glyph button. */
+.bcw-chip-icon {
+  width: 30px;
+  justify-content: center;
+  color: var(--bcw-t3);
+}
+.bcw-chip-icon[data-on="1"] { color: rgba(186,183,228,0.96); }
+/* The count used to be a solid red disc with a hard ring — the loudest
+   thing on an otherwise quiet board, and just as loud for one stale reply
+   as for a live escalation. It's muted by default now and only takes the
+   warm tone when something unread is actually an escalation, so the loud
+   state carries information instead of being the permanent state.       */
+.bcw-chip-count {
+  position: absolute; top: -3px; right: -3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 14px; height: 14px; padding: 0 3.5px;
+  border-radius: 7px;
+  font-size: 9px; font-weight: 650; line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  color: rgba(214,215,232,0.95);
+  background: rgba(74,76,104,0.92);
+  border: 1px solid rgba(150,148,200,0.26);
+  box-shadow: 0 0 0 1.5px rgba(11,12,20,0.9);
+}
+.bcw-chip-count[data-tone="alert"] {
+  color: rgba(240,206,196,0.98);
+  background: rgba(132,72,66,0.92);
+  border-color: rgba(196,128,118,0.38);
+}
+
+/* Readout: glyph, hairline, caption over figure, delta. */
+.bcw-chip-read { padding: 0 8px 0 7px; gap: 7px; }
+.bcw-chip-glyph {
+  display: inline-flex; flex-shrink: 0;
+  color: var(--bcw-t3);
+  transition: color 0.16s;
+}
+.bcw-chip-read:hover .bcw-chip-glyph,
+.bcw-chip-read[data-on="1"] .bcw-chip-glyph { color: rgba(178,175,220,0.95); }
+.bcw-chip-rule {
+  flex-shrink: 0;
+  width: 1px; height: 15px;
+  background: rgba(255,255,255,0.06);
+}
+.bcw-chip-stack {
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: 1px; min-width: 0;
+}
+.bcw-chip-cap {
+  font-size: 8px; font-weight: 600; line-height: 1;
+  letter-spacing: 0.11em; text-transform: uppercase;
+  color: rgba(158,162,180,0.42);
+  white-space: nowrap;
+}
+.bcw-chip-fig {
+  font-size: 12.5px; font-weight: 600; line-height: 1;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  color: rgba(214,217,230,0.9);
+  white-space: nowrap;
+}
+.bcw-chip-delta {
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 3px;
+  height: 15px; padding: 0 2px;
+  margin-left: 0;
+  border-radius: 4px;
+  font-size: 9px; font-weight: 600; line-height: 1;
+  letter-spacing: -0.005em;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+.bcw-chip:hover .bcw-chip-delta,
+.bcw-chip[data-on="1"] .bcw-chip-delta { opacity: 1; }
+.bcw-chip-delta[data-dir="up"]   { color: rgba(140,180,150,0.95); background: transparent; }
+.bcw-chip-delta[data-dir="down"] { color: rgba(198,142,134,0.95); background: transparent; }
+
+/* ── NET CHIP ─────────────────────────────────────────────────
+   At rest: just the wallet glyph, the same 30x30 square as the
+   activity chip beside it. The amount slides out from behind the glyph
+   on load (once), on hover/focus, while the breakdown is open, and when
+   a payment lands — then tucks away again.
+
+   The reveal's width is set inline to the figure's measured width and
+   eased here, so the chip grows by exactly the amount it needs and
+   follows the figure while it counts. The figure itself arrives a beat
+   after the chip starts opening (fade + a few px of slide + a touch of
+   blur clearing), and leaves first on the way back, so the text never
+   gets clipped mid-read by the closing edge.                         */
+.bcw-chip-net.bcw-chip-read { padding: 0; gap: 0; }
+.bcw-chip-net .bcw-chip-glyph {
+  width: 28px; height: 28px;
+  align-items: center; justify-content: center;
+  transition: color 0.3s ease;
+}
+.bcw-chip-reveal {
+  display: inline-flex; align-items: center;
+  height: 100%;
+  overflow: hidden;
+  transition: width 480ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.bcw-chip-reveal-in {
+  display: inline-flex; align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
+  padding-right: 11px;
+  opacity: 0;
+  transform: translateX(-6px);
+  filter: blur(2px);
+  transition:
+    opacity 180ms ease,
+    transform 380ms cubic-bezier(0.32, 0.72, 0, 1),
+    filter 180ms ease;
+}
+.bcw-chip-net[data-open="1"] .bcw-chip-reveal-in {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  transition:
+    opacity 320ms ease 90ms,
+    transform 520ms cubic-bezier(0.32, 0.72, 0, 1) 40ms,
+    filter 320ms ease 90ms;
+}
+.bcw-chip-net .bcw-chip-rule { margin-right: 9px; height: 13px; background: rgba(255,255,255,0.075); }
+
+/* The amount. Inter at a medium weight with tabular figures, so digits
+   hold their columns while they count; a soft sage-pearl rather than
+   white — it reads as money without shouting "profit!" in green. */
+.bcw-chip-net .bcw-chip-fig {
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.012em;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  color: rgba(210, 226, 217, 0.93);
+  text-shadow: 0 0 0 rgba(120, 210, 160, 0);
+  transition: color 700ms ease, text-shadow 700ms ease;
+}
+.bcw-chip-net[data-zero="1"] .bcw-chip-fig { color: rgba(170, 176, 196, 0.58); }
+/* A payment just landed: a brief, gentle lift towards mint that settles
+   back to the resting tone once the count has finished. */
+.bcw-chip-net[data-bump="1"] .bcw-chip-fig {
+  color: rgba(152, 226, 184, 1);
+  text-shadow: 0 0 14px rgba(120, 210, 160, 0.32);
+  transition: color 220ms ease, text-shadow 220ms ease;
+}
+.bcw-chip-net[data-bump="1"] .bcw-chip-glyph { color: rgba(152, 226, 184, 0.95); }
+
+@media (prefers-reduced-motion: reduce) {
+  .bcw-chip-reveal, .bcw-chip-reveal-in, .bcw-chip-net .bcw-chip-fig { transition: none !important; }
+}
+
+/* ── DROPDOWN PANELS ────────────────────────────────────────
+   One shell for both header chips: 14px card surface, a fixed 52px
+   header (title over one quiet sub-line), a segmented tab strip, then
+   content. Same head/tabs geometry in each so the two panels read as
+   one product rather than two popovers. Type is Inter with tabular
+   figures; every money value is right-aligned on a shared column so
+   the digits stack.                                                */
+/* THE SAME GLASS AS THE POPUPS. These two dropdowns used to sit on a
+   0.22 fill — close to clear — so whatever was behind them (the animated
+   background, the dashboard, a chat) showed straight through the text
+   and made them hard to read. They now use the settings/license/invoice
+   popups' exact recipe: the same fill (following the Panel glass
+   preference via --glass-a), blur, hairline edge, highlight and shadow,
+   and the app's own typeface. */
+.bcw-pop {
+  position: fixed;
+  z-index: 9600;
+  max-width: calc(100vw - 24px);
+  display: flex; flex-direction: column;
+  background: rgba(12,13,24,var(--glass-a, 0.66));
+  backdrop-filter: blur(24px) saturate(170%) brightness(1.04);
+  -webkit-backdrop-filter: blur(24px) saturate(170%) brightness(1.04);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 18px;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255,255,255,0.04),
+    inset 0 1px 0 rgba(255,255,255,0.08),
+    0 24px 70px -16px rgba(0,0,0,0.70),
+    0 4px 16px rgba(0,0,0,0.30);
+  overflow: hidden;
+  font-family: var(--font, 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  color: var(--t1, #eeeef5);
+  animation: bcw-pop-in 220ms cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes bcw-pop-in {
+  from { opacity: 0; transform: translateX(6px) translateY(4px) scale(0.985); filter: blur(2px); }
+  to   { opacity: 1; transform: none; filter: blur(0); }
+}
+/* The earnings sheet (phones) opens from the settings sheet, which is
+   there whatever the dashboard is doing. */
+body[data-bcw-hidden="1"] .bcw-pop:not(.bcw-pop-sheet) { display: none !important; }
+
+/* ── EARNINGS AS A FULL-SCREEN SHEET (phones) ─────────────────────
+   Opened from the wallet button in the Payments section of the settings
+   sheet. Same surface, title bar and close button as the settings sheet;
+   the breakdown below is the dropdown's, set as cards at phone sizes. */
+.bcw-sheet-btn {
+  all: unset; box-sizing: border-box; flex-shrink: 0; cursor: pointer;
+  height: 30px; padding: 0 11px 0 9px; gap: 6px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 600; letter-spacing: -0.01em; font-variant-numeric: tabular-nums;
+  color: rgba(214,217,232,0.86);
+  background: rgba(255,255,255,0.05);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 0.14s ease;
+}
+.bcw-sheet-btn:active, .bcw-sheet-btn[data-on="1"] { background: rgba(255,255,255,0.1); }
+.bcw-sheet-btn svg { opacity: 0.75; flex-shrink: 0; }
+.bcw-sheet-btn[data-bump="1"] { color: rgba(154,198,164,0.98); }
+.bcw-sheet-btn:focus-visible { outline: none; box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--acc, #6c63ff) 55%, transparent); }
+
+.bcw-pop.bcw-pop-sheet {
+  inset: 0; width: auto; max-width: none; z-index: 9800;
+  background: #10111d;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+  border: none; border-radius: 0; box-shadow: none;
+  padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  animation: bcw-sheet-in 220ms cubic-bezier(0.16,1,0.3,1) both;
+}
+/* Fully opaque: it covers the whole screen, so nothing behind should read
+   through (the "lite" performance mode's 0.98 fill for popups included). */
+html body .bcw-pop.bcw-pop-sheet { background: #10111d !important; }
+@keyframes bcw-sheet-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .bcw-pop.bcw-pop-sheet { animation: none; } }
+.bcw-sheet-hd {
+  flex-shrink: 0; display: flex; align-items: center; gap: 10px; box-sizing: border-box;
+  height: calc(44px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 8px 0 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.bcw-sheet-title { flex: 1; min-width: 0; font-size: 16px; font-weight: 650; letter-spacing: -0.02em; color: var(--t1, #eeeef5); }
+.bcw-sheet-x {
+  all: unset; box-sizing: border-box; cursor: pointer; width: 36px; height: 36px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center; color: rgba(200,203,220,0.75);
+  -webkit-tap-highlight-color: transparent;
+}
+.bcw-sheet-x:active { background: rgba(255,255,255,0.08); }
+.bcw-sheet-body {
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 14px 16px calc(24px + env(safe-area-inset-bottom));
+}
+/* Range: a segmented control across the top. */
+.bcw-pop-sheet .bcw-pop-tabs, .bcw-pop-sheet .bcw-pop-tabs[data-bare="1"] {
+  padding: 3px; gap: 2px; border: none; border-radius: 11px;
+  background: rgba(255,255,255,0.045); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06);
+}
+.bcw-pop-sheet .bcw-pop-tabs button {
+  height: 32px; margin: 0; border: none; border-radius: 8px;
+  font-size: 13px; font-weight: 550; color: rgba(170,174,194,0.85);
+}
+.bcw-pop-sheet .bcw-pop-tabs button[aria-selected="true"] {
+  color: var(--t1, #eeeef5); background: rgba(255,255,255,0.09);
+  box-shadow: inset 0 0.5px 0 rgba(255,255,255,0.08), 0 1px 2px rgba(0,0,0,0.25);
+}
+/* The figure. */
+.bcw-pop-sheet .bcw-pf-hero { padding: 10px 2px 2px; }
+.bcw-pop-sheet .bcw-pf-val { font-size: 44px; font-weight: 300; }
+.bcw-pop-sheet .bcw-pf-herometa { margin-top: 10px; }
+.bcw-pop-sheet .bcw-pf-herolbl { font-size: 10.5px; }
+.bcw-pop-sheet .bcw-pf-delta { height: 20px; font-size: 11px; padding: 0 6px; }
+/* Chart, figures and recent payments: one card each. */
+.bcw-pop-sheet .bcw-pf-chart, .bcw-pop-sheet .bcw-pf-grid, .bcw-pop-sheet .bcw-pf-recent, .bcw-pop-sheet .bcw-pf-none {
+  margin: 0; border-radius: 14px;
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+}
+.bcw-pop-sheet .bcw-pf-chart { padding: 14px 14px 12px; }
+.bcw-pop-sheet .bcw-pf-bars { height: 84px; gap: 3px; }
+.bcw-pop-sheet .bcw-pf-axis { font-size: 9.5px; margin-top: 8px; padding-top: 7px; }
+.bcw-pop-sheet .bcw-pf-grid { padding: 16px; gap: 18px 16px; }
+.bcw-pop-sheet .bcw-pf-cell { gap: 6px; }
+.bcw-pop-sheet .bcw-pf-k { font-size: 10px; }
+.bcw-pop-sheet .bcw-pf-v { font-size: 17px; font-weight: 550; }
+.bcw-pop-sheet .bcw-pf-recent { padding: 12px 8px 8px; }
+.bcw-pop-sheet .bcw-pf-rechead { font-size: 10px; padding: 0 8px 6px; }
+.bcw-pop-sheet .bcw-pf-recrow { padding: 10px 8px; border-radius: 9px; }
+.bcw-pop-sheet .bcw-pf-recrow + .bcw-pf-recrow { border-top: 1px solid rgba(255,255,255,0.05); border-radius: 0; }
+.bcw-pop-sheet .bcw-pf-recname { font-size: 14px; }
+.bcw-pop-sheet .bcw-pf-recpkg { font-size: 12px; margin-top: 1px; }
+.bcw-pop-sheet .bcw-pf-recamt { font-size: 14px; }
+.bcw-pf-none { padding: 18px 16px; text-align: center; font-size: 12.5px; color: rgba(164,168,188,0.72); }
+
+/* ── HEADER ── */
+.bcw-pop-tabs {
+  flex-shrink: 0;
+  display: flex;
+  margin: 0;
+  padding: 0;
+  background: rgba(255,255,255,0.025);
+  border: none;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  border-radius: 0;
+}
+/* With the header removed, this strip is the panel's top edge, so it takes
+   the corner radius the header used to own and a little more headroom. */
+.bcw-pop-tabs[data-bare="1"] {
+  padding-top: 4px;
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
+}
+.bcw-pop-tabs button {
+  flex: 1 1 0; min-width: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 29px; padding: 0 4px; gap: 4px;
+  margin-bottom: -1px;
+  font-family: inherit;
+  font-size: 11px; font-weight: 600; letter-spacing: -0.005em;
+  color: rgba(170,174,194,0.82);
+  background: transparent; border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer; white-space: nowrap;
+  transition: color 0.12s, border-color 0.12s;
+}
+.bcw-pop-tabs button:hover { color: rgba(214,217,230,0.92); background: transparent; }
+.bcw-pop-tabs button[aria-selected="true"] {
+  color: var(--t1, #eeeef5); font-weight: 600;
+  border-bottom-color: var(--acc, #6c63ff);
+  background: transparent;
+}
+
+/* ── SCROLL AREA ── */
+.bcw-pop-scroll {
+  flex: 1 1 auto; min-height: 0;
+  max-height: min(58vh, 420px);
+  overflow-y: auto;
+  padding: 4px 8px 10px;
+}
+/* The notifications panel has no header or tab strip above it any more, so
+   its scroller IS the panel — it needs the top padding and the rounded top
+   corners the header used to provide. */
+.bcw-pop-scroll[data-bare="1"] {
+  padding-top: 6px;
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
+  scrollbar-width: none;
+  /* Soft bottom edge so a clipped row reads as "more below" rather
+     than as a row someone cut in half. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent 100%);
+}
+.bcw-pop-scroll::-webkit-scrollbar { display: none; }
+
+.bcw-pop-empty {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 34px 26px 38px;
+  text-align: center;
+}
+.bcw-pop-empty-t { font-size: 12.5px; font-weight: 600; color: rgba(214,216,232,0.92); letter-spacing: -0.008em; }
+.bcw-pop-empty-s { font-size: 11px; line-height: 1.55; color: rgba(164,168,188,0.8); }
+
+/* ── ACTIVITY FEED ── */
+.bcw-nday {
+  display: flex; align-items: center; gap: 6px;
+  padding: 14px 8px 6px;
+  font-size: 8.5px; font-weight: 700;
+  letter-spacing: 0.11em; text-transform: uppercase;
+  color: rgba(160,164,184,0.72);
+}
+.bcw-nday:first-child { padding-top: 8px; }
+/* The "Needs you" section — the only group that represents work rather
+   than history, so it's the only one allowed any colour. */
+.bcw-nday[data-urgent="1"] { color: rgba(204,166,124,0.86); }
+.bcw-ndayc {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 14px; height: 14px; padding: 0 3.5px;
+  border-radius: 7px;
+  font-size: 8.5px; font-weight: 700; line-height: 1;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  color: rgba(214,180,140,0.96);
+  background: rgba(196,152,104,0.14);
+}
+
+/* Rows are real buttons now — clicking one opens the conversation it's
+   about. The reset below is what stops the UA button styling (centred
+   text, system font, border) leaking in. */
+.bcw-nrow {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 8px;
+  border: none; border-radius: 9px;
+  background: transparent;
+  font-family: inherit; text-align: left;
+  transition: background 0.12s;
+}
+.bcw-nrow[data-act="1"] { cursor: pointer; }
+.bcw-nrow[data-act="0"] { cursor: default; }
+.bcw-nrow:hover { background: rgba(255,255,255,0.05); }
+/* Rows that want something carry a full-contrast title; rows that are
+   just context are held back a stop. The distinction is now meaningful —
+   data-fresh tracks whether the row needs the operator, not merely whether
+   it arrived since they last looked, so it doesn't decay into "everything
+   is highlighted". */
+.bcw-nrow[data-fresh="1"] .bcw-nrow-title { color: rgba(238,240,248,0.98); font-weight: 600; }
+.bcw-nrow[data-fresh="0"] { opacity: 0.9; }
+.bcw-nrow[data-fresh="0"]:hover { opacity: 1; }
+.bcw-nrow[data-fresh="0"] .bcw-nrow-ico { opacity: 0.72; }
+
+.bcw-nrow-ico {
+  flex-shrink: 0;
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.055);
+  color: rgba(170,175,192,0.9);
+}
+.bcw-nrow-ico[data-tint="ok"]   { color: rgba(140,190,152,0.95); background: rgba(120,175,132,0.11); border-color: rgba(120,175,132,0.22); }
+.bcw-nrow-ico[data-tint="info"] { color: rgba(142,172,200,0.95); background: rgba(130,165,196,0.11); border-color: rgba(130,165,196,0.22); }
+.bcw-nrow-ico[data-tint="err"]  { color: rgba(206,142,132,0.95); background: rgba(196,128,118,0.11); border-color: rgba(196,128,118,0.24); }
+.bcw-nrow-ico[data-tint="warn"] { color: rgba(206,178,124,0.95); background: rgba(196,168,112,0.11); border-color: rgba(196,168,112,0.24); }
+
+.bcw-nrow-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.bcw-nrow-title {
+  font-size: 11.5px; font-weight: 500; line-height: 1.3;
+  letter-spacing: -0.008em;
+  color: rgba(226,228,240,0.95);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* One line, one string, one ellipsis at the end. The previous version laid
+   several parts out with flexbox, which meant they competed for width and
+   the LAST one lost — so the panel showed "Telegra…" while the message it
+   was qualifying still had room. A single text node can only truncate in
+   the one place truncation makes sense. */
+.bcw-nrow-sub {
+  font-size: 10.5px; line-height: 1.35;
+  letter-spacing: -0.003em;
+  color: rgba(168,172,192,0.8);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bcw-nrow-right {
+  flex-shrink: 0; display: flex; flex-direction: column;
+  align-items: flex-end; gap: 4px;
+  padding-left: 4px;
+}
+.bcw-nrow-amt {
+  font-size: 11.5px; font-weight: 600; line-height: 1;
+  letter-spacing: -0.012em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(154,198,164,0.96);
+}
+/* Money that hasn't confirmed yet shouldn't read the same as money that
+   has — same figure, different certainty. */
+.bcw-nrow-amt[data-kind="pending"] { color: rgba(206,178,124,0.92); }
+.bcw-nrow-t {
+  font-size: 9.5px; font-weight: 450; line-height: 1;
+  letter-spacing: -0.002em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(156,160,180,0.76);
+}
+
+/* ── MONEY PANEL ── */
+.bcw-pf-hero { padding: 12px 13px 2px; }
+.bcw-pf-val {
+  font-size: 27px; font-weight: 300; line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(238,240,247,0.98);
+}
+.bcw-pf-herometa {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 7px;
+}
+.bcw-pf-herolbl {
+  font-size: 9px; font-weight: 650;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: rgba(164,168,188,0.74);
+}
+.bcw-pf-delta {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 17px; padding: 0 5px;
+  border-radius: 5px;
+  font-size: 9.5px; font-weight: 650; letter-spacing: -0.004em;
+  font-variant-numeric: tabular-nums;
+}
+.bcw-pf-delta[data-dir="up"]   { color: rgba(146,192,156,0.98); background: rgba(120,170,130,0.13); }
+.bcw-pf-delta[data-dir="down"] { color: rgba(208,146,136,0.98); background: rgba(196,128,118,0.13); }
+.bcw-pf-deltanote { font-weight: 450; opacity: 0.65; letter-spacing: -0.002em; }
+
+.bcw-pf-chart { padding: 11px 13px 0; }
+.bcw-pf-bars {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 36px;
+}
+.bcw-pf-bar {
+  flex: 1 1 0; min-width: 0;
+  border-radius: 2px 2px 0 0;
+  background: linear-gradient(180deg, rgba(163,160,220,0.72), rgba(112,110,160,0.30));
+}
+.bcw-pf-bar[data-zero="1"] {
+  background: rgba(255,255,255,0.065);
+  min-height: 2px;
+  border-radius: 1px;
+}
+.bcw-pf-axis {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255,255,255,0.045);
+  font-size: 8.5px; font-weight: 500;
+  letter-spacing: 0.09em; text-transform: uppercase;
+  color: rgba(152,156,176,0.66);
+}
+.bcw-pf-axis span:nth-child(2) { color: rgba(152,156,176,0.46); }
+
+.bcw-pf-grid {
+  margin-top: 12px;
+  padding: 10px 13px;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.025);
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 9px 12px;
+}
+.bcw-pf-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.bcw-pf-k {
+  font-size: 8.5px; font-weight: 650;
+  letter-spacing: 0.085em; text-transform: uppercase;
+  color: rgba(164,168,188,0.72);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bcw-pf-v {
+  font-size: 11.5px; font-weight: 550; line-height: 1;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(228,230,242,0.96);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bcw-pf-v[data-tone="neg"]  { color: rgba(190,150,144,0.82); }
+.bcw-pf-v[data-tone="warn"] { color: rgba(206,178,124,0.92); }
+
+/* The last few payments, by name. The panel used to show four totals and
+   no indication of who any of it came from, so a spike in the figure was
+   unattributable without leaving the panel. */
+.bcw-pf-recent {
+  padding: 9px 7px 10px;
+  border-top: 1px solid rgba(255,255,255,0.07);
+}
+.bcw-pf-rechead {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 0 6px 5px;
+  font-size: 8.5px; font-weight: 700;
+  letter-spacing: 0.11em; text-transform: uppercase;
+  color: rgba(160,164,184,0.72);
+}
+.bcw-pf-recago { font-weight: 500; letter-spacing: 0.02em; text-transform: none; opacity: 0.8; }
+.bcw-pf-recrow {
+  width: 100%;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 5px 6px;
+  border: none; border-radius: 7px;
+  background: transparent;
+  font-family: inherit; text-align: left;
+  transition: background 0.12s;
+}
+.bcw-pf-recrow[data-act="1"] { cursor: pointer; }
+.bcw-pf-recrow[data-act="0"] { cursor: default; }
+.bcw-pf-recrow:hover { background: rgba(255,255,255,0.05); }
+.bcw-pf-recwho { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.bcw-pf-recname {
+  font-size: 11.5px; font-weight: 500; line-height: 1.25;
+  letter-spacing: -0.008em;
+  color: rgba(226,228,240,0.95);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bcw-pf-recpkg {
+  font-size: 10px; line-height: 1.3;
+  color: rgba(168,172,192,0.8);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bcw-pf-recamt {
+  flex-shrink: 0;
+  font-size: 11.5px; font-weight: 600; line-height: 1;
+  letter-spacing: -0.012em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(154,198,164,0.96);
+}
+.bcw-pf-recamt[data-pending="1"] { color: rgba(206,178,124,0.92); }
+/* ── AVATAR LOADING ───────────────────────────────────────────
+   Used by <Ava> (bot-ui-shared.jsx) while an avatar image is in flight,
+   or while a brand-new contact's picture is still being resolved.
+   A slow glass sheen drifts across the face while one tapered arc
+   travels the rim with a gentle speed swell (quick through the top,
+   easing through the bottom), which reads as calm progress rather than
+   a spinner. Transform-only, so both run on the compositor. */
+@keyframes ava-spin    { to { transform: rotate(360deg); } }
+@keyframes ava-breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.9; } }
+@keyframes ava-sheen {
+  0%   { transform: translate3d(0,0,0); }
+  62%  { transform: translate3d(270%,0,0); }
+  100% { transform: translate3d(270%,0,0); }
+}
+.ava-arc   { animation: ava-spin 1.25s cubic-bezier(0.55,0.2,0.45,0.8) infinite; will-change: transform; }
+.ava-sheen { animation: ava-sheen 2.1s cubic-bezier(0.45,0,0.35,1) infinite; will-change: transform; }
+@media (prefers-reduced-motion: reduce) {
+  .ava-arc, .ava-sheen { animation: none; }
+  .ava-sheen { display: none; }
+}
+
+/* ── AGENT REPLY HOURS ───────────────────────────────────────
+   Schedule editor inside the agent popup (AgentReplyHours in
+   bot-ui-views.jsx). Built from the popup's own vocabulary: the
+   ToggleRow switch, recessed inputs (rgba 11,12,20), the indigo
+   selection tint, and the instrument-panel status colours used by
+   .sset-pill. One row until it's switched on or opened. */
+.ags {
+  display: flex; flex-direction: column;
+  margin-top: 2px; padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+
+/* Head row */
+.ags-head {
+  display: flex; align-items: center; gap: 10px;
+  cursor: pointer; min-width: 0;
+}
+.ags-head-main {
+  appearance: none; flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0; border: none; background: none;
+  color: inherit; text-align: left; cursor: pointer;
+  border-radius: 8px;
+}
+.ags-head-main:focus-visible { outline: 2px solid rgba(108,99,255,0.6); outline-offset: 3px; }
+.ags-ico {
+  width: 26px; height: 26px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px;
+  color: var(--t3);
+  background: rgba(255,255,255,0.035);
+  border: 1px solid rgba(255,255,255,0.07);
+  transition: color 0.18s, background 0.18s, border-color 0.18s;
+}
+.ags[data-on="1"] .ags-ico {
+  color: #b9b4ff;
+  background: rgba(108,99,255,0.12);
+  border-color: rgba(140,132,255,0.28);
+}
+.ags-head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ags-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ags-title { font-size: 12px; font-weight: 500; color: var(--t1); letter-spacing: -0.005em; white-space: nowrap; }
+.ags-status {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: 10.5px; font-weight: 500; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  color: var(--t3);
+}
+.ags-status i {
+  width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
+  background: currentColor; opacity: 0.6;
+}
+.ags-status[data-tone="ok"]   { color: #7fd3a6; }
+.ags-status[data-tone="ok"] i { opacity: 1; box-shadow: 0 0 5px rgba(67,201,138,0.85); }
+.ags-status[data-tone="warn"]   { color: #e3b978; }
+.ags-status[data-tone="warn"] i { opacity: 1; box-shadow: 0 0 5px rgba(232,168,68,0.75); }
+.ags-status[data-tone="err"]   { color: rgba(255,130,120,0.95); }
+.ags-status[data-tone="err"] i { opacity: 1; }
+.ags-summary {
+  font-size: 10.5px; color: var(--t3); line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Switch — same geometry as ToggleRow */
+.ags-switch {
+  position: relative; flex-shrink: 0;
+  width: 30px; height: 17px; padding: 0; border-radius: 9px;
+  background: rgba(11,12,20,0.55);
+  border: 0.5px solid rgba(255,255,255,0.07);
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s;
+}
+.ags-switch[data-on="1"] {
+  background: linear-gradient(180deg, #5f57d8, #4b44b0);
+  border-color: rgba(160,152,255,0.28);
+}
+.ags-switch-knob {
+  position: absolute; top: 1.5px; left: 1.5px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: rgba(255,255,255,0.5);
+  transition: left 0.18s cubic-bezier(0.4,0,0.2,1), background 0.18s;
+}
+.ags-switch[data-on="1"] .ags-switch-knob { left: 14.5px; background: rgba(240,240,250,0.95); }
+.ags-switch:focus-visible { outline: 2px solid rgba(108,99,255,0.6); outline-offset: 2px; }
+
+.ags-chev {
+  display: inline-flex; flex-shrink: 0; color: var(--t4);
+  transition: transform 0.22s cubic-bezier(.3,.7,.4,1), opacity 0.15s;
+}
+.ags[data-on="0"] .ags-chev { visibility: hidden; }
+.ags[data-open="1"] .ags-chev { transform: rotate(90deg); color: var(--t3); }
+
+/* Expanding body — height is measured in JS */
+.ags-body {
+  overflow: hidden;
+  transition: height 0.26s cubic-bezier(.3,.7,.4,1);
+}
+.ags-inner { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; }
+
+/* Week at a glance */
+.ags-week {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 12px 8px;
+  border-radius: 9px;
+  background: rgba(11,12,20,0.45);
+  border: 1px solid rgba(255,255,255,0.05);
+}
+.ags-week-row, .ags-week-ticks { display: flex; align-items: center; gap: 8px; }
+.ags-week-day {
+  width: 16px; flex-shrink: 0;
+  font-size: 9px; font-weight: 600; line-height: 1;
+  color: var(--t4);
+}
+.ags-week-row[data-today="1"] .ags-week-day { color: #b9b4ff; }
+.ags-week-bar {
+  position: relative; flex: 1; height: 5px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.05);
+}
+.ags-week-seg {
+  position: absolute; top: 0; bottom: 0;
+  border-radius: 3px;
+  background: linear-gradient(90deg, rgba(118,110,245,0.72), rgba(146,139,255,0.72));
+}
+.ags-week-row[data-today="1"] .ags-week-seg {
+  background: linear-gradient(90deg, #6f67f2, #938cff);
+}
+.ags-week-now {
+  position: absolute; top: -3px; bottom: -3px;
+  width: 2px; margin-left: -1px; border-radius: 1px;
+  background: var(--t1);
+  box-shadow: 0 0 0 2px rgba(13,14,23,0.9);
+}
+.ags-week-ticks { margin-top: 2px; }
+.ags-week-tickrow {
+  position: relative; flex: 1; height: 10px;
+  font-size: 8.5px; color: var(--t4); font-variant-numeric: tabular-nums;
+}
+.ags-week-tickrow span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.ags-week-tickrow span:nth-child(1) { left: 0; transform: none; }
+.ags-week-tickrow span:nth-child(2) { left: 25%; }
+.ags-week-tickrow span:nth-child(3) { left: 50%; }
+.ags-week-tickrow span:nth-child(4) { left: 75%; }
+.ags-week-tickrow span:nth-child(5) { left: 100%; transform: translateX(-100%); }
+
+/* Blocks */
+.ags-blocks { display: flex; flex-direction: column; }
+.ags-block {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.045);
+}
+.ags-block:first-child { padding-top: 2px; }
+.ags-block-time { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ags-time {
+  appearance: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 8px 0 9px;
+  border-radius: 7px;
+  background: rgba(11,12,20,0.62);
+  border: 1px solid rgba(255,255,255,0.07);
+  color: var(--t1);
+  font-family: inherit; font-size: 11.5px; font-weight: 550;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.ags-time svg { color: var(--t4); }
+.ags-time:hover { border-color: rgba(255,255,255,0.14); }
+.ags-time[data-open="1"],
+.ags-time:focus-visible {
+  outline: none;
+  border-color: rgba(108,99,255,0.45);
+  box-shadow: 0 0 0 3px rgba(108,99,255,0.10);
+}
+.ags-dash { font-size: 11px; color: var(--t4); }
+.ags-note { font-size: 10px; color: var(--t3); white-space: nowrap; }
+.ags-spacer { flex: 1; }
+.ags-x {
+  width: 22px; height: 22px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px; color: var(--t4);
+  transition: background 0.12s, color 0.12s;
+}
+.ags-x:hover { background: rgba(255,69,58,0.10); color: rgba(255,120,110,0.95); }
+.ags-x:focus-visible { outline: 2px solid rgba(255,90,80,0.5); outline-offset: 1px; }
+
+.ags-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.ags-day {
+  height: 24px; padding: 0;
+  border-radius: 6px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: -0.005em;
+  color: var(--t3);
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.06);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.ags-day:hover { color: var(--t1); border-color: rgba(255,255,255,0.13); }
+.ags-day[data-on="1"] {
+  color: #e6e4ff;
+  background: rgba(108,99,255,0.17);
+  border-color: rgba(140,132,255,0.34);
+}
+.ags-day:focus-visible { outline: 2px solid rgba(108,99,255,0.6); outline-offset: 1px; }
+
+.ags-add { align-self: flex-start; }
+.ags-add:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Time zone + outside hours */
+.ags-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ags-label { font-size: 11px; font-weight: 500; color: var(--t3); flex-shrink: 0; }
+.ags .ags-tz { flex: 1; min-width: 0; width: auto; text-overflow: ellipsis; }
+.ags-outside { display: flex; flex-direction: column; gap: 6px; }
+.ags-seg {
+  display: flex; gap: 3px; padding: 2px;
+  border-radius: 9px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+}
+.ags-seg button {
+  flex: 1; min-width: 0;
+  padding: 6px 4px; border-radius: 7px;
+  font-size: 11px; font-weight: 500; letter-spacing: -0.01em;
+  color: var(--t3); white-space: nowrap;
+  transition: background 0.14s, color 0.14s, box-shadow 0.14s;
+}
+.ags-seg button:hover { color: var(--t1); }
+.ags-seg button[data-on="1"] {
+  color: var(--t1); font-weight: 600;
+  background: rgba(255,255,255,0.10);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+}
+.ags-seg button:focus-visible { outline: 2px solid rgba(108,99,255,0.6); outline-offset: -2px; }
+.ags-hint { font-size: 10.5px; color: var(--t3); line-height: 1.45; }
+
+/* Time dropdown (portalled to body) */
+.ags-menu {
+  position: fixed; z-index: 9999;
+  width: 172px; padding: 5px;
+  background: rgba(20,22,42,0.98);
+  backdrop-filter: blur(24px) saturate(170%);
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.04) inset;
+  animation: ags-menu-in 120ms cubic-bezier(0.16,1,0.3,1) both;
+}
+.ags-menu[data-up="1"] { transform: translateY(-100%); animation-name: ags-menu-in-up; }
+@keyframes ags-menu-in    { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@keyframes ags-menu-in-up { from { opacity: 0; transform: translateY(calc(-100% + 3px)); } to { opacity: 1; transform: translateY(-100%); } }
+.ags-menu-input {
+  width: 100%; height: 28px; padding: 0 8px; margin-bottom: 4px;
+  border-radius: 7px;
+  background: rgba(11,12,20,0.62);
+  border: 1px solid rgba(255,255,255,0.07);
+  font-size: 11.5px; color: var(--t1);
+  transition: border-color 0.12s;
+}
+.ags-menu-input::placeholder { color: var(--t4); }
+.ags-menu-input:focus { border-color: rgba(108,99,255,0.45); }
+.ags-menu-input[data-bad="1"] { border-color: rgba(255,69,58,0.40); }
+.ags-menu-list { max-height: 216px; overflow-y: auto; }
+.ags-menu-opt {
+  width: 100%;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 8px; border-radius: 6px;
+  font-size: 12px; font-weight: 500; color: var(--t2);
+  font-variant-numeric: tabular-nums; text-align: left;
+}
+.ags-menu-opt[data-hi="1"]  { background: rgba(255,255,255,0.05); color: var(--t1); }
+.ags-menu-opt[data-sel="1"] { background: rgba(108,99,255,0.16); color: var(--t1); font-weight: 600; }
+.ags-menu-dur { font-size: 10.5px; font-weight: 500; color: var(--t4); }
+
+/* Realism → Timing: link back to the editor */
+.ags-link {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: 10px;
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.07);
+  text-align: left;
+  transition: background 0.14s, border-color 0.14s;
+}
+.ags-link:hover { background: rgba(255,255,255,0.045); border-color: rgba(255,255,255,0.11); }
+.ags-link:focus-visible { outline: 2px solid rgba(108,99,255,0.6); outline-offset: 2px; }
+.ags-link-ico { display: inline-flex; color: var(--t3); flex-shrink: 0; }
+.ags-link-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ags-link-title { font-size: 12px; font-weight: 600; color: var(--t1); }
+.ags-link-sub { font-size: 10px; color: var(--t3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ags-link-go { font-size: 10.5px; color: var(--t3); white-space: nowrap; flex-shrink: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ags-body, .ags-chev, .ags-switch, .ags-switch-knob, .ags-ico { transition: none; }
+  .ags-menu, .ags-menu[data-up="1"] { animation: none; }
+}

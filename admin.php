@@ -2374,7 +2374,8 @@ table.t { font-size: 12.5px; }
 .tabs button:hover { color: var(--t1); }
 .tabs button[aria-selected="true"] { color: var(--t1); background: none; box-shadow: inset 0 -2px 0 #2dd4bf; }
 .tabs .cnt { font-size: 10.5px; color: var(--t3); font-variant-numeric: tabular-nums; }
-.toolbar .tabs { flex: 1; min-width: 0; }
+.toolbar .tabs { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.settings-bar .tabs { flex: 1 1 auto; }
 
 /* Key / value lists as ruled rows. */
 .kv { gap: 0; font-size: 12.5px; }
@@ -2492,6 +2493,97 @@ table.t { font-size: 12.5px; }
 .price-t td { border-bottom-color: rgba(255,255,255,.035); }
 @media (max-width: 760px) { .frow { grid-template-columns: minmax(0, 1fr); gap: 8px; } .fc, .fc.col { justify-content: flex-start; align-items: flex-start; } }
 
+/* ── House style (matches the app) ──────────────────────────────
+   One neutral graphite accent; colour is used sparingly, as dots.
+   States read "● Active"; categories are thin outlined tags. */
+:root { --acc: #8b8fa3; --d-ok: #5fae84; --d-warn: #c29a5e; --d-bad: #c9786f; --d-info: #7f9fb8; }
+:focus-visible { outline: 2px solid rgba(255,255,255,.3); outline-offset: 2px; }
+
+/* Buttons */
+.btn { height: 30px; padding: 0 12px; border-radius: 8px; font-size: 11.5px; font-weight: 550; letter-spacing: -.005em; gap: 6px; transition: background-color .12s, border-color .12s, color .12s, filter .12s; }
+.btn:active { transform: translateY(.5px); }
+.btn-s { height: 26px; padding: 0 10px; font-size: 11.5px; border-radius: 7px; }
+.btn-g { color: var(--t2); background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.08); }
+.btn-g:hover { color: var(--t1); background: rgba(255,255,255,.09); border-color: rgba(255,255,255,.14); }
+.btn-p { color: #fff; background: #767a90; border-color: transparent; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,.28); }
+.btn-p:hover { background: #767a90; filter: brightness(1.1); box-shadow: 0 2px 8px rgba(0,0,0,.28); }
+.btn-d { color: rgba(255,120,110,.95); background: rgba(255,69,58,.08); border-color: rgba(255,69,58,.2); }
+.btn-d:hover { color: rgba(255,140,130,1); background: rgba(255,69,58,.14); border-color: rgba(255,69,58,.32); }
+.btn svg { opacity: .8; }
+.modal-f .btn:focus, .modal-f .btn:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(255,255,255,.18); }
+
+/* Inputs */
+.inp { background: rgba(255,255,255,.03); border-color: rgba(255,255,255,.09); }
+.inp:hover { border-color: rgba(255,255,255,.14); }
+.inp:focus { border-color: rgba(255,255,255,.26); box-shadow: 0 0 0 3px rgba(255,255,255,.05); }
+
+/* Switches: small, neutral, the accent when on */
+.sw { width: 28px; height: 16px; background: rgba(255,255,255,.09); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); transition: background-color .18s; }
+.sw::after { top: 2px; left: 2px; width: 12px; height: 12px; background: rgba(205,208,222,.7); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: transform .18s cubic-bezier(.4,0,.2,1), background .18s; }
+.sw:hover { box-shadow: inset 0 0 0 1px rgba(255,255,255,.16); }
+.sw[aria-checked="true"] { background: color-mix(in srgb, var(--acc) 60%, #1b1c2e); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.sw[aria-checked="true"]::after { transform: translateX(12px); background: #f3f3f7; }
+.sw.danger[aria-checked="true"] { background: color-mix(in srgb, #ff453a 50%, #1b1c2e); }
+
+/* Status: a dot and a word, no box */
+.chip.ok, .chip.warn, .chip.bad, .chip.info { height: auto; padding: 0; gap: 6px; border: 0; background: none; border-radius: 0; font-size: 11.5px; font-weight: 500; letter-spacing: 0; color: var(--t2); }
+.chip.ok > i, .chip.warn > i, .chip.bad > i, .chip.info > i { display: none; }
+.chip.ok::before, .chip.warn::before, .chip.bad::before, .chip.info::before { content: ''; width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.chip.ok::before { background: var(--d-ok); } .chip.warn::before { background: var(--d-warn); }
+.chip.bad::before { background: var(--d-bad); } .chip.info::before { background: var(--d-info); }
+.chip.bad { color: #d4a39c; }
+/* Categories and counts: a thin outlined tag */
+.chip, .chip.guest, .chip.ai { height: 18px; padding: 0 6px; border-radius: 4px; font-size: 10.5px; font-weight: 500; color: var(--t2); background: transparent; border: 1px solid rgba(255,255,255,.1); }
+.chip.tg, .chip.dc, .chip.dm { border: 0; padding: 0; height: auto; font-size: 11.5px; gap: 6px; background: none; }
+.nav a .cnt { background: rgba(255,255,255,.06); color: var(--t2); }
+.nav a .cnt.hot { background: rgba(255,69,58,.1); color: #e3a39b; }
+.delta { background: none !important; padding: 0; height: auto; font-weight: 600; }
+.delta.up { color: #8fc4a4; } .delta.down { color: #d4a39c; } .delta.flat { color: var(--t3); }
+
+/* Dots used across the console */
+.dot.on, .chip i.on { background: var(--d-ok); } .dot.warn { background: var(--d-warn); } .dot.bad { background: var(--d-bad); }
+.newdot { background: var(--d-ok); box-shadow: none; }
+.live i { background: var(--d-ok); }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(95,174,132,.35); } 50% { box-shadow: 0 0 0 4px rgba(95,174,132,0); } }
+
+/* Navigation and tabs: neutral selection */
+.nav a { height: 32px; font-size: 12.5px; border-radius: 8px; }
+.nav a[aria-current="page"] { background: rgba(255,255,255,.06); box-shadow: none; }
+.nav a[aria-current="page"]::before { background: #c9cbd9; width: 2px; }
+.tabs button[aria-selected="true"] { box-shadow: inset 0 -2px 0 #c9cbd9; }
+.seg button[aria-pressed="true"] { background: rgba(255,255,255,.08); box-shadow: none; }
+
+/* Banners: quiet panel, colour only in the icon and a thin edge */
+.banner, .banner.bad, .banner.info { color: var(--t1); background: rgba(255,255,255,.03); border: 1px solid var(--ln2); border-left-width: 2px; }
+.banner { border-left-color: var(--d-warn); } .banner svg { color: var(--d-warn); }
+.banner.bad { border-left-color: var(--d-bad); } .banner.bad svg { color: var(--d-bad); }
+.banner.info { border-left-color: var(--d-info); } .banner.info svg { color: var(--d-info); }
+
+/* Activity feed icons: neutral tiles, tinted glyphs */
+.ev .ei { background: rgba(255,255,255,.04) !important; }
+.ico-signup, .ico-sale { color: var(--d-ok); } .ico-guest, .ico-admin, .ico-tx { color: var(--d-info); }
+.ico-error { color: var(--d-bad); } .ico-spam, .ico-bot { color: var(--d-warn); }
+
+/* Sidebar status box */
+.ai-sw.paused { border-color: rgba(201,120,111,.3); background: rgba(201,120,111,.05); }
+
+/* Chat: agent bubbles in the accent tint */
+.cmsg.out .cbub { background: rgba(139,143,163,.13); border-color: rgba(139,143,163,.2); }
+.cmsg.in .cbub { background: rgba(255,255,255,.045); }
+.cmsg.failed .cbub { border-color: rgba(201,120,111,.5); }
+
+/* Risk meter in the same muted colours */
+.risk .rb { width: 36px; height: 4px; }
+.st.ok { color: var(--t1); } .st.bad { color: #d4a39c; }
+.neg, .cfacts .neg, .bl-err { color: #d4a39c; }
+.settings-bar .dirty { color: var(--d-warn); }
+.hashbox { color: #cfd3e0; border-color: rgba(255,255,255,.18); }
+.bar-r .bb { height: 3px; } .bar-r .bb i { background: #8b8fa3 !important; }
+:root { --c-tg: #5b93bf; --c-dc: #7d80c6; --c-dm: #5aa39a; --c-ai: #b08cc6; --c-money: #6fae8c; }
+.av { color: #e4e6ee; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.av.on::after { background: var(--d-ok); }
+.kpi .sp { opacity: .6; }
+
 @media (max-width: 1280px) { .g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1080px) { .g21, .g12, .g3 { grid-template-columns: minmax(0, 1fr); } .search .inp { width: 180px; } }
 @media (max-width: 860px) {
@@ -2607,7 +2699,7 @@ table.t { font-size: 12.5px; }
     </nav>
     <div class="side-foot">
       <div class="ai-sw" id="ai-box">
-        <div><span class="lbl">Agent replies</span><b id="ai-state"><i class="dot on"></i>On for everyone</b></div>
+        <div><span class="lbl">Agent replies</span><b id="ai-state"><i class="dot on"></i>On</b></div>
         <button class="btn btn-g btn-s" id="ai-pause" data-paused="0" title="Stop every agent on every account from replying" style="margin-left:auto">Pause all</button>
       </div>
       <div class="me"><span class="av" style="background:linear-gradient(145deg,#0d2a33,#0b1a31)"><svg width="14" height="14"><use href="#i-user"/></svg></span><?= $h(ADMIN_USERNAME) ?><a href="?logout=1">Sign out</a></div>
@@ -2726,7 +2818,8 @@ function bytes(b) { b = +b || 0; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i 
 const plural = (k, one, many) => n(k) + ' ' + (Math.round(k) === 1 ? one : (many || one + 's'));
 
 // ── Small building blocks ───────────────────────────────────
-const GRADS = [['#14b8a6', '#0e7490'], ['#0ea5e9', '#1e40af'], ['#6366f1', '#312e81'], ['#8b5cf6', '#4c1d95'], ['#06b6d4', '#155e75'], ['#10b981', '#065f46'], ['#3b82f6', '#1e3a8a'], ['#a855f7', '#581c87']];
+// Avatars: quiet, desaturated tones (the app's look), told apart by hue.
+const GRADS = [['#3d5a66', '#26363f'], ['#3f4f6e', '#262f44'], ['#4a4a6e', '#2c2c45'], ['#56486a', '#332a42'], ['#3b5f5a', '#243a37'], ['#4d5a45', '#2f372a'], ['#5a4c42', '#382e28'], ['#5e4556', '#3a2a35']];
 function initials(name) { const p = String(name || '?').replace(/^@/, '').trim().split(/\s+/); return ((p[0] || '?')[0] + (p.length > 1 ? p[p.length - 1][0] : (p[0][1] || ''))).toUpperCase(); }
 function av(a, cls) {
   if (!a) return '<span class="av" style="background:#1b2536">?</span>';
@@ -2749,7 +2842,7 @@ function chips(a) {
   if (a.online) s += '<span class="chip ok"><i></i>Online</span> ';
   return s;
 }
-const RISK_C = { high: '#ff5d6c', medium: '#f5a524', low: '#7dd3fc', none: '#3d4658' };
+const RISK_C = { high: '#c9786f', medium: '#c29a5e', low: '#7f9fb8', none: '#3d4658' };
 const lvl = (s) => (s >= 60 ? 'high' : s >= 30 ? 'medium' : s > 0 ? 'low' : 'none');
 function riskBar(s) {
   if (!s) return '<span class="dim">—</span>';
@@ -2988,7 +3081,8 @@ function ask(o) {
 }
 
 // ══ VIEWS ═══════════════════════════════════════════════════
-const C = { tg: '#38bdf8', dc: '#818cf8', dm: '#5eead4', ai: '#e9a8ff', money: '#86efac', warn: '#f5a524', bad: '#ff5d6c', gem: '#7aa2ff', oai: '#d6dbe4', cla: '#e2906f' };
+// Chart colours: muted, so data reads clearly without shouting.
+const C = { tg: '#5b93bf', dc: '#7d80c6', dm: '#5aa39a', ai: '#b08cc6', money: '#6fae8c', warn: '#c29a5e', bad: '#c9786f', gem: '#7390c9', oai: '#a9aebb', cla: '#c28a6f' };
 const PROV = { gemini: ['Gemini', C.gem], openai: ['OpenAI', C.oai], claude: ['Claude', C.cla] };
 // Whose AI costs are counted (Settings → AI page switch): your built-in AI by default.
 const SCOPE = { builtin: ['Built-in AI', 'on your built-in AI'], own: ['Customers’ own keys', 'on customers’ own keys'], all: ['Both', 'on your built-in AI and customers’ own keys'] };
@@ -3429,7 +3523,7 @@ function renderDrawer() {
   const meta = [a.guest ? 'Guest' + (a.host ? ' of ' + a.host.name : '') : '@' + a.username, a.email, '#' + a.id, 'joined ' + day(a.created), a.seen ? 'seen ' + ago(a.seen) : 'never seen'].filter(Boolean).join(' · ');
   let h = '<div class="dr-h">' + av(a) + '<div style="min-width:0"><h2>' + esc(a.name) + ' ' + (a.guest ? '<span class="chip guest">Guest</span>' : '') + (a.suspended ? '<span class="chip bad"><i></i>Suspended</span>' : '')
     + (online ? '<span class="chip ok"><i></i>Online</span>' : '') + (d.risk.score ? '<span class="chip ' + (d.risk.score >= 60 ? 'bad' : d.risk.score >= 30 ? 'warn' : 'info') + '">Risk ' + d.risk.score + '</span>' : '') + '</h2>'
-    + '<div class="meta">' + esc(meta) + '</div>' + (a.suspended && a.suspend_reason ? '<div class="meta" style="color:#ffb4bc">Suspended ' + esc(ago(a.suspended_at)) + ': ' + esc(a.suspend_reason) + '</div>' : '') + '</div>'
+    + '<div class="meta">' + esc(meta) + '</div>' + (a.suspended && a.suspend_reason ? '<div class="meta" style="color:#d4a39c">Suspended ' + esc(ago(a.suspended_at)) + ': ' + esc(a.suspend_reason) + '</div>' : '') + '</div>'
     + '<button class="btn btn-g btn-i x" data-act="close-drawer" aria-label="Close"><svg><use href="#i-x"/></svg></button></div>';
   h += '<div class="dr-act">'
     + '<button class="btn btn-p btn-s" data-act="impersonate"' + (a.suspended ? ' disabled' : '') + '><svg><use href="#i-open"/></svg>Open the app as ' + esc(a.guest ? 'this guest' : a.name) + '</button>'
@@ -3713,7 +3807,7 @@ function setAiSwitch(paused) {
   b.className = 'btn btn-s ' + (paused ? 'btn-p' : 'btn-g');
   b.title = paused ? 'Let agents reply again' : 'Stop every agent on every account from replying';
   $('#ai-box').classList.toggle('paused', !!paused);
-  $('#ai-state').innerHTML = paused ? '<i class="dot bad"></i>Paused for everyone' : '<i class="dot on"></i>On for everyone';
+  $('#ai-state').innerHTML = paused ? '<i class="dot bad"></i>Paused' : '<i class="dot on"></i>On';
 }
 
 // ══ ACTIONS ═════════════════════════════════════════════════

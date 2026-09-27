@@ -984,7 +984,7 @@ function api_accounts(array $q): array {
     $sort = (string)($q['sort'] ?? 'created');
     $dir = ($q['dir'] ?? 'desc') === 'asc' ? 1 : -1;
     $page = max(1, (int)($q['page'] ?? 1));
-    $per = 50;
+    $per = 25;
     $needle = mb_strtolower(trim((string)($q['q'] ?? '')));
     $all = a_accounts_all();
     $risk = a_risk_all();
@@ -1447,26 +1447,51 @@ function api_messages(array $q): array {
                                                 WHERE m.created_at >= ? AND LEFT(m.conv_id,3) <> 'dm_' GROUP BY m.account_id, m.conv_id ORDER BY n DESC LIMIT 12", [$r['from']]) as $x) {
         $busy[] = ['acc' => a_acc_brief(a_accounts_all()[(int)$x['account_id']] ?? null), 'conv' => $x['conv_id'], 'name' => $x['name'] ?: $x['conv_id'], 'platform' => $x['platform'] ?: 'telegram', 'n' => (int)$x['n']];
     }
-    // Recent messages, optionally searched.
+    // Latest messages: one line per conversation — its newest message (that
+    // matches the search / filter), how many it had in 30 days — newest
+    // conversation first, a page at a time.
     $needle = trim((string)($q['q'] ?? ''));
     $role = (string)($q['role'] ?? '');
-    $w = ["m.created_at >= ?"]; $p = [a_ago_sql(30 * 86400)];
+    $per = 15;
+    $page = max(1, (int)($q['page'] ?? 1));
+    $w = ["m.created_at >= ?", "LEFT(m.conv_id,3) <> 'dm_'"]; $p = [a_ago_sql(30 * 86400)];
     if ($needle !== '') { $w[] = 'm.content LIKE ?'; $p[] = '%' . addcslashes($needle, '%_\\') . '%'; }
     if (in_array($role, ['in', 'out'], true)) { $w[] = $role === 'in' ? "m.role='in'" : "m.role<>'in'"; }
     if ($role === 'ai' && a_col('bc_messages', 'agent_name')) $w[] = "m.role<>'in' AND m.agent_name<>''";
-    $stream = a_has('bc_messages') ? a_rows("SELECT m.id, m.account_id, m.conv_id, m.role, LEFT(m.content, 400) content, m.media_type, " . (a_col('bc_messages', 'agent_name') ? 'm.agent_name' : "''") . " agent_name, m.created_at,
-                                                    c.name cname, c.platform
-                                               FROM bc_messages m LEFT JOIN bc_conversations c ON c.account_id=m.account_id AND c.id=m.conv_id
-                                              WHERE " . implode(' AND ', $w) . " ORDER BY m.id DESC LIMIT 80", $p) : [];
-    $all = a_accounts_all();
-    foreach ($stream as &$s) $s['owner'] = a_acc_brief($all[(int)$s['account_id']] ?? null);
-    unset($s);
+    $where = implode(' AND ', $w);
+    $convs = []; $convTotal = 0;
+    if (a_has('bc_messages')) {
+        $convTotal = (int)a_val("SELECT COUNT(*) FROM (SELECT 1 FROM bc_messages m WHERE $where GROUP BY m.account_id, m.conv_id) x", $p);
+        $pages = max(1, (int)ceil($convTotal / $per));
+        $page = min($page, $pages);
+        $groups = a_rows("SELECT m.account_id, m.conv_id, COUNT(*) n, SUM(m.role='in') n_in, MAX(m.id) last_id
+                            FROM bc_messages m WHERE $where GROUP BY m.account_id, m.conv_id
+                           ORDER BY last_id DESC LIMIT $per OFFSET " . (($page - 1) * $per), $p);
+        if ($groups) {
+            $ids = array_map(fn($g) => (int)$g['last_id'], $groups);
+            $last = [];
+            foreach (a_rows("SELECT m.id, m.role, LEFT(m.content, 300) content, m.media_type, " . (a_col('bc_messages', 'agent_name') ? 'm.agent_name' : "''") . " agent_name, m.created_at,
+                                    c.name cname, c.handle, c.platform
+                               FROM bc_messages m LEFT JOIN bc_conversations c ON c.account_id=m.account_id AND c.id=m.conv_id
+                              WHERE m.id IN (" . implode(',', $ids) . ")") as $x) $last[(int)$x['id']] = $x;
+            $all = a_accounts_all();
+            foreach ($groups as $g) {
+                $x = $last[(int)$g['last_id']] ?? null;
+                if (!$x) continue;
+                $convs[] = ['account_id' => (int)$g['account_id'], 'conv_id' => $g['conv_id'], 'n' => (int)$g['n'], 'n_in' => (int)$g['n_in'],
+                            'owner' => a_acc_brief($all[(int)$g['account_id']] ?? null), 'name' => $x['cname'] ?: $g['conv_id'], 'handle' => (string)($x['handle'] ?? ''),
+                            'platform' => $x['platform'] ?: 'telegram', 'role' => $x['role'], 'agent_name' => $x['agent_name'], 'content' => $x['content'],
+                            'media_type' => $x['media_type'], 'created_at' => $x['created_at']];
+            }
+        }
+    }
     $sum = fn($a) => array_sum($a);
     return [
         'range' => $r['key'],
         'totals' => ['telegram' => $sum($ch['telegram']), 'discord' => $sum($ch['discord']), 'direct' => $sum($ch['direct']), 'ai' => $sum($ch['ai']),
                      'inbound' => $sum($ch['inbound']), 'outbound' => $sum($ch['outbound']), 'failed' => $fail, 'outbox_failed' => $outboxFail],
-        'series' => ['labels' => $r['buckets']] + $ch, 'heat' => $heat, 'busy' => $busy, 'stream' => $stream,
+        'series' => ['labels' => $r['buckets']] + $ch, 'heat' => $heat, 'busy' => $busy,
+        'convs' => $convs, 'conv_total' => $convTotal, 'page' => $page, 'pages' => max(1, (int)ceil($convTotal / $per)), 'per' => $per,
     ];
 }
 
@@ -2213,6 +2238,107 @@ table.t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .row-f .tx span { font-size: 12px; color: var(--t3); }
 .row-f > :last-child:not(:first-child) { margin-left: auto; }
 
+/* ── Compact, quieter layout ───────────────────────────────────
+   Same information, less chrome: calmer background, tighter spacing,
+   stat tiles joined into one strip, smaller charts, flat buttons, and
+   long lists split into pages (see paginate() in the script). */
+[hidden] { display: none !important; }
+:root { --r: 10px; --glass: rgba(11,17,27,.74); }
+body { font-size: 13px; }
+.fx i { opacity: .16; }
+.fx::after { background: radial-gradient(ellipse 110% 90% at 50% 40%, transparent 30%, rgba(0,0,0,.65) 100%); }
+.word { animation: none; background-position: 0 50%; }
+.top { padding: 11px 24px 10px; }
+.top h1 { font-size: 17px; background: none; -webkit-background-clip: border-box; background-clip: border-box; color: var(--t1); }
+.top .sub { font-size: 11.5px; }
+.page { padding: 16px 24px 48px; gap: 12px; }
+.grid { gap: 12px; }
+.card { background: var(--glass); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.card-h { padding: 11px 14px 0; min-height: 30px; }
+.card-h h2 { font-size: 12.5px; font-weight: 600; }
+.card-h .hint { font-size: 11.5px; }
+.card-b { padding: 10px 14px 12px; }
+.card-b.flush { padding: 6px 0 0; }
+.banner { padding: 8px 12px; font-size: 12.5px; border-radius: 9px; }
+.banner svg { width: 15px; height: 15px; }
+.btn { height: 30px; padding: 0 11px; border-radius: 8px; font-size: 12px; }
+.btn-s { height: 26px; padding: 0 9px; font-size: 11.5px; border-radius: 7px; }
+.btn-i { width: 30px; } .btn-s.btn-i { width: 26px; }
+.btn-p { color: #03161a; background: #2dd4bf; box-shadow: none; }
+.btn-p:hover { background: #5eead4; box-shadow: none; }
+.inp { height: 32px; border-radius: 8px; }
+.toolbar .inp { height: 30px; width: 240px; }
+.seg button { height: 24px; font-size: 11.5px; }
+.tabs { padding: 2px; border-radius: 9px; }
+.tabs button { height: 26px; padding: 0 10px; font-size: 12px; }
+.live { height: 30px; } .search .inp { height: 30px; } .search > svg { top: 8px; } .search kbd { top: 6px; }
+
+/* Stat tiles in a row become one strip with thin dividers. */
+.grid:has(> .kpi) { gap: 0; border: 1px solid var(--ln); border-radius: var(--r); overflow: hidden; background: var(--glass); }
+.grid:has(> .kpi) > .kpi { border: 0; border-radius: 0; box-shadow: -1px -1px 0 0 var(--ln); }
+.kpi { padding: 10px 14px 9px; background: transparent; }
+.kpi .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--t3); font-weight: 600; }
+.kpi .l svg { width: 12px; height: 12px; }
+.kpi .v { margin-top: 4px; font-size: 19px; font-weight: 600; letter-spacing: -.02em; }
+.kpi.hero .v { font-size: 19px; background: none; -webkit-background-clip: border-box; background-clip: border-box; color: var(--t1); }
+.kpi .v small { font-size: 12px; }
+.kpi .s { margin-top: 3px; font-size: 11px; min-height: 16px; }
+.kpi .sp { height: 18px; margin-top: 5px; opacity: .75; }
+.kpi[data-go]:hover { background: rgba(255,255,255,.025); }
+
+.chart { height: 180px; } .chart.sm { height: 120px; } .chart.xs { height: 86px; } .chart.lg { height: 326px; }
+.donut svg { width: 104px; height: 104px; }
+
+/* Tables: denser rows, quieter headers. */
+table.t { font-size: 12.5px; }
+.t th { padding: 6px 12px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; background: rgba(9,14,24,.5); }
+.t td { padding: 6px 12px; }
+.t td .chip { vertical-align: middle; }
+.who { gap: 8px; }
+.av { width: 26px; height: 26px; font-size: 10px; }
+.who b { font-size: 12.5px; } .who > div > span { font-size: 11px; }
+.chip { height: 18px; padding: 0 7px; font-size: 10.5px; }
+.chip.ai { color: #f0c6ff; background: rgba(233,168,255,.08); border-color: rgba(233,168,255,.18); }
+.pager { padding: 7px 14px; font-size: 11.5px; border-top: 1px solid rgba(255,255,255,.04); }
+.pager.pg { gap: 6px; }
+.pager .btn { margin-left: 0; }
+.pager .pgn { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; color: var(--t2); }
+
+/* Feed and rankings */
+.feed { max-height: none; overflow: visible; }
+.ev { grid-template-columns: 22px minmax(0, 1fr) auto; gap: 9px; padding: 6px 14px; align-items: center; }
+.ev .ei { width: 22px; height: 22px; border-radius: 6px; }
+.ev .ei svg { width: 11px; height: 11px; }
+.ev .et { padding-top: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev time { padding-top: 0; }
+.rank a { padding: 6px 14px; }
+.bars { gap: 7px; } .bar-r { font-size: 12px; } .bar-r .bb { height: 4px; }
+.kv { gap: 6px 14px; font-size: 12.5px; }
+.row-f { padding: 10px 0; }
+
+/* Latest messages: one line per conversation */
+.mconv td { white-space: nowrap; }
+.mconv .mc { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.mconv .mc b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.mconv .mt { color: var(--t2); }
+.pi { flex: none; } .pi-tg { color: var(--c-tg); } .pi-dc { color: var(--c-dc); } .pi-dm { color: var(--c-dm); }
+.newdot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; box-shadow: 0 0 0 3px rgba(48,209,88,.14); }
+
+.t .who > div { display: flex; align-items: baseline; gap: 6px; }
+.t .who .av { width: 22px; height: 22px; font-size: 9px; }
+.t .who b { max-width: 170px; }
+.t .who > div > span { max-width: 120px; }
+.rank .rk { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.clip1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Drawer */
+.dr-h { padding: 14px 20px 12px; }
+.dr-h .av { width: 38px; height: 38px; font-size: 13px; }
+.dr-h h2 { font-size: 16px; }
+.dr-act { padding: 9px 20px; }
+.dr-tabs { padding: 10px 20px 0; }
+.dr-b { padding: 12px 20px 32px; gap: 12px; }
+
 @media (max-width: 1280px) { .g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1080px) { .g21, .g12, .g3 { grid-template-columns: minmax(0, 1fr); } .search .inp { width: 180px; } }
 @media (max-width: 860px) {
@@ -2228,6 +2354,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .dr-h, .dr-act, .dr-tabs, .dr-b { padding-left: 14px; padding-right: 14px; }
 }
 @media (max-width: 520px) { .g2, .g4, .g6 { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 520px) { .grid:has(> .kpi) { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi .sp { display: none; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -2369,8 +2496,8 @@ const S = {
   view: 'overview', data: null, live: true, busy: false, lastAt: 0, skew: 0, refresh: Math.max(5, BQ.refresh || 15),
   ranges: { ai: '30d', revenue: '30d', messages: '7d' },
   acc: { type: 'accounts', sort: 'created', dir: 'desc', page: 1, q: '' },
-  guests: { filter: 'all', q: '' }, msg: { q: '', role: '' },
-  drawer: null, dtab: 'overview', charts: {}, chartN: 0, boot: null, modal: false, reqId: 0,
+  guests: { filter: 'all', q: '' }, msg: { q: '', role: '', page: 1 },
+  drawer: null, dtab: 'overview', charts: {}, chartN: 0, boot: null, modal: false, reqId: 0, pg: {},
 };
 const VIEWS = {
   overview: ['Overview', 'Everything happening on booqi, updated live'],
@@ -2475,6 +2602,11 @@ function riskBar(s) {
   if (!s) return '<span class="dim">—</span>';
   const c = RISK_C[lvl(s)];
   return '<span class="risk"><span class="rb"><i style="width:' + Math.min(100, s) + '%;background:' + c + '"></i></span><b style="color:' + c + '">' + s + '</b></span>';
+}
+function platIco(p) {
+  p = String(p || '').toLowerCase();
+  const k = p === 'discord' ? 'dc' : p === 'direct' ? 'dm' : 'tg';
+  return '<svg class="pi pi-' + k + '" width="13" height="13" aria-label="' + esc(p || 'telegram') + '"><use href="#i-' + (k === 'dm' ? 'lock' : k) + '"/></svg>';
 }
 function plat(p) {
   p = String(p || '').toLowerCase();
@@ -2748,10 +2880,10 @@ V.overview = function (d) {
   const feed = d.feed.length ? '<div class="feed">' + d.feed.map((e) => '<div class="ev"' + (e.acc ? ' data-acc="' + e.acc + '"' : '') + '><span class="ei ico-' + e.kind + '"><svg><use href="#' + (EV_ICON[e.kind] || 'i-bolt') + '"/></svg></span><span class="et">' + esc(e.text) + '</span><time>' + esc(ago(e.t)) + '</time></div>').join('') + '</div>' : empty('Nothing has happened yet');
   const top = (list, fmt) => list.length ? '<div class="rank">' + list.map((x, i) => '<a href="#/account/' + x.acc.id + '"><span class="n">' + (i + 1) + '</span>' + who(x.acc, x.acc.guest ? 'Guest' : '@' + x.acc.username) + '<b>' + fmt(x.v) + '</b></a>').join('') + '</div>' : empty('Nobody yet');
   const tt = S.topTab || 'messages';
-  h += '<div class="grid g21">'
+  h += '<div class="grid g21" style="align-items:start">'
     + card('What’s happening', feed, { flush: true, hint: 'newest first' })
-    + '<div class="grid" style="align-content:start">'
     + card('Top accounts', top(d.top[tt], tt === 'messages' ? n : usd), { flush: true, right: seg('top', tt, [['messages', 'Messages'], ['cost', k.ai_scope === 'builtin' ? 'Built-in AI' : 'AI cost'], ['sales', 'Sales']]) })
+    + '</div><div class="grid g2">'
     + card('Safety', '<dl class="kv">'
         + '<dt>High-risk accounts</dt><dd><a href="#/risk" class="chip ' + (k.risk_high ? 'bad' : '') + '">' + n(k.risk_high) + '</a></dd>'
         + '<dt>Medium-risk accounts</dt><dd><a href="#/risk" class="chip ' + (k.risk_med ? 'warn' : '') + '">' + n(k.risk_med) + '</a></dd>'
@@ -2760,7 +2892,7 @@ V.overview = function (d) {
         + '<dt>AI calls failing (30d)</dt><dd class="num">' + pct(k.llm_30d.errors, k.llm_30d.calls) + '</dd></dl>')
     + card('Engagement', '<dl class="kv"><dt>Active today</dt><dd class="num">' + n(k.dau) + '</dd><dt>Active this week</dt><dd class="num">' + n(k.wau) + '</dd><dt>Active this month</dt><dd class="num">' + n(k.mau) + '</dd>'
         + '<dt>Daily / monthly</dt><dd class="num">' + pct(k.dau, k.mau) + '</dd><dt>Sign-ups today</dt><dd class="num">' + n(k.signups_today) + '</dd></dl>')
-    + '</div></div>';
+    + '</div>';
   return h;
 };
 
@@ -2771,8 +2903,8 @@ V.accounts = function (d) {
     + '<span class="grow"></span><input class="inp" id="acc-q" placeholder="Name, username, email or #id" value="' + esc(a.q) + '">'
     + '<a class="btn btn-g" href="?api=export&what=accounts"><svg><use href="#i-down"/></svg>Export CSV</a></div>';
   if (!d.rows.length) return h + card('', empty('No accounts match', a.q ? 'Try a different search.' : 'Nothing in this list right now.'));
-  h += '<section class="card"><div class="tw"><table class="t"><thead><tr>' + col('name', 'Account') + '<th>Status</th>' + col('created', 'Joined') + col('seen', 'Last seen')
-    + col('msgs', 'Messages 30d', 1) + col('ai', 'By agents 30d', 1) + col('cost', d.ai_scope === 'builtin' ? 'Built-in AI 30d' : 'AI cost 30d', 1) + col('sales', 'Sales', 1) + col('convs', 'Chats', 1) + '<th class="r">Bots</th>' + col('risk', 'Risk') + '</tr></thead><tbody>';
+  h += '<section class="card"><div class="tw"><table class="t" data-nopage><thead><tr>' + col('name', 'Account') + '<th>Status</th>' + col('created', 'Joined') + col('seen', 'Last seen')
+    + col('msgs', 'Msgs 30d', 1) + col('ai', 'By agents', 1) + col('cost', d.ai_scope === 'builtin' ? 'Built-in AI' : 'AI cost', 1) + col('sales', 'Sales', 1) + col('convs', 'Chats', 1) + '<th class="r">Bots</th>' + col('risk', 'Risk') + '</tr></thead><tbody>';
   d.rows.forEach((r) => {
     h += '<tr data-acc="' + r.id + '"><td>' + who(r, r.guest ? 'Guest of ' + (r.guest_of ? r.guest_of.name : '—') : null) + '</td><td>' + (chips(r) || '<span class="dim">Active</span>') + '</td>'
       + '<td class="dim">' + esc(day(r.created)) + '</td><td class="dim">' + esc(r.seen ? ago(r.seen) : 'never') + '</td>'
@@ -2807,7 +2939,7 @@ V.guests = function (d) {
   h += '<div class="toolbar">' + tabs('gfilter', g.filter, [['all', 'All'], ['active', 'Active in 24 h'], ['silent', 'Silent'], ['claimed', 'Claimed'], ['flagged', 'Flagged']])
     + '<span class="grow"></span><input class="inp" id="guest-q" placeholder="Search guest or host" value="' + esc(g.q) + '"></div>';
   if (!d.rows.length) return h + card('', empty('No guests match'));
-  h += '<section class="card"><div class="tw"><table class="t"><thead><tr><th>Guest</th><th>Writing to</th><th>Started</th><th>Last seen</th><th class="r">Sent</th><th class="r">Received</th><th class="r">From agents</th><th class="r">Same address</th><th>Risk</th><th></th></tr></thead><tbody>';
+  h += '<section class="card"><div class="tw"><table class="t" data-per="25"><thead><tr><th>Guest</th><th>Writing to</th><th>Started</th><th>Last seen</th><th class="r">Sent</th><th class="r">Received</th><th class="r">From agents</th><th class="r">Same address</th><th>Risk</th><th></th></tr></thead><tbody>';
   d.rows.forEach((r) => {
     h += '<tr data-acc="' + r.id + '"><td>' + who(r, '@' + r.username) + '</td><td><a href="#/account/' + r.host.id + '" data-stop>' + esc(r.host.name) + '</a></td><td class="dim">' + esc(ago(r.created)) + '</td>'
       + '<td class="dim">' + esc(r.seen ? ago(r.seen) : 'never') + '</td><td class="r num">' + n(r.sent) + '</td><td class="r num">' + n(r.recv) + '</td><td class="r num">' + n(r.ai) + '</td>'
@@ -2815,7 +2947,7 @@ V.guests = function (d) {
       + '<td title="' + esc(r.risk_top) + '">' + riskBar(r.risk) + '</td><td class="r">' + (r.claimed ? '<span class="chip ok">Claimed</span> ' : '') + (r.suspended ? '<span class="chip bad">Suspended</span> ' : '')
       + '<button class="btn btn-g btn-s btn-i" title="Delete guest" data-act="del-guest" data-id="' + r.id + '" data-u="' + esc(r.username) + '"><svg><use href="#i-trash"/></svg></button></td></tr>';
   });
-  h += '</tbody></table></div><div class="pager">Showing ' + n(Math.min(400, d.shown)) + ' of ' + n(d.shown) + '</div></section>';
+  h += '</tbody></table></div>' + (d.shown > 400 ? '<div class="pager">Only the newest 400 of ' + n(d.shown) + ' are listed. Search to narrow it down.</div>' : '') + '</section>';
   return h;
 };
 
@@ -2830,7 +2962,7 @@ V.risk = function (d) {
     + kpi({ label: 'Shared addresses', icon: 'i-users', value: n(d.clusters.length), sub: '3+ accounts from one place' })
     + '</div>';
   const flagged = d.rows.filter((r) => r.score > 0);
-  h += card('Flagged accounts', flagged.length ? '<div class="tw"><table class="t"><thead><tr><th>Account</th><th>Score</th><th>Why</th><th>Joined</th><th></th></tr></thead><tbody>'
+  h += card('Flagged accounts', flagged.length ? '<div class="tw"><table class="t" data-per="15"><thead><tr><th>Account</th><th>Score</th><th>Why</th><th>Joined</th><th></th></tr></thead><tbody>'
       + flagged.map((r) => '<tr data-acc="' + r.acc.id + '"><td>' + who(r.acc, r.acc.guest ? 'Guest' : null) + '</td><td>' + riskBar(r.score) + '</td><td><div class="reasons">'
         + r.reasons.map((x) => '<span class="chip ' + (x.pts >= 25 ? 'bad' : x.pts >= 15 ? 'warn' : 'info') + '" title="+' + x.pts + ' points">' + esc(x.why) + '</span>').join('') + '</div></td>'
         + '<td class="dim">' + esc(ago(r.acc.created)) + '</td><td class="r">' + (r.acc.suspended ? '<span class="chip bad">Suspended</span>' : '<button class="btn btn-d btn-s" data-act="suspend" data-id="' + r.acc.id + '" data-name="' + esc(r.acc.name) + '">Suspend</button>') + '</td></tr>').join('')
@@ -2865,19 +2997,15 @@ V.ai = function (d) {
   let h = '';
   if (d.paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>All AI calls are paused.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume AI</button></div>';
   const sc = d.scope || 'builtin', bi = d.builtin || {};
-  // Whose calls this page counts. Your built-in AI is what you pay for;
-  // customers' own keys are theirs, shown only when you ask for them.
-  h += '<div class="toolbar"><span class="dim" style="font-size:12.5px">Showing costs</span>' + seg('aiscope', sc, [['builtin', 'Your built-in AI'], ['own', 'Customers’ own keys'], ['all', 'Both']]) + '<span class="grow"></span></div>';
-  const biPrice = bi.price ? '$' + (+bi.price.in).toFixed(2) + ' in / $' + (+bi.price.out).toFixed(2) + ' out per 1M tokens' + (bi.price.guess ? ' (fallback — add it to AI prices)' : '') : '';
-  h += card('Built-in AI', '<div class="row-f"><div class="tx"><b>' + (bi.on ? 'On' : 'Off') + (bi.model ? ' · <span class="mono">' + esc(bi.model) + '</span>' : '') + ' <span class="dim">(' + esc(provName(bi.provider)) + ')</span></b>'
-      + '<span>' + (bi.on ? plural(bi.users || 0, 'account') + ' chose it in the app. ' : (bi.has_key ? 'The key is saved; turn it on so accounts can choose it. ' : 'No key saved yet. ')) + esc(biPrice) + '</span></div>'
-      + '<a class="btn btn-g btn-s" href="#/settings">' + (bi.has_key ? 'Change' : 'Set it up') + '</a></div>', { hint: 'your key, offered to every account' });
-  if (!d.tracking_since) h += '<div class="banner info"><svg><use href="#i-spark"/></svg><span>No AI calls recorded yet. Once the new api.php is on the server, every call is recorded here with its tokens and cost.</span></div>';
-  else h += '<div class="banner info"><svg><use href="#i-spark"/></svg><span>Recording since ' + esc(when(d.tracking_since)) + '. '
-    + (sc === 'builtin' ? 'These are calls on your built-in AI key — what you pay for. Customers’ calls on their own keys are left out.'
-      : sc === 'own' ? 'These are calls on customers’ own API keys: their cost, not yours.'
-      : 'These are all calls: on your built-in AI and on customers’ own keys.')
-    + ' Priced with your list in <a href="#/settings" style="text-decoration:underline">Settings</a>.' + (t.est ? ' ' + n(t.est) + ' calls didn’t report tokens and were estimated.' : '') + '</span></div>';
+  // One header card: the built-in AI's state, and whose costs this page counts
+  // (your built-in AI by default; customers' own keys only when you ask).
+  const biPrice = bi.price ? '$' + (+bi.price.in).toFixed(2) + ' in / $' + (+bi.price.out).toFixed(2) + ' out per 1M' + (bi.price.guess ? ' (fallback price)' : '') : '';
+  h += card('Built-in AI', '<div class="row-f" style="padding:2px 0 0"><div class="tx"><b>' + (bi.on ? '<span class="chip ok"><i></i>On</span>' : '<span class="chip">Off</span>') + (bi.model ? ' <span class="mono">' + esc(bi.model) + '</span> <span class="dim" style="font-weight:400">' + esc(provName(bi.provider)) + '</span>' : '') + '</b>'
+      + '<span>' + (bi.on ? plural(bi.users || 0, 'account') + ' on it · ' : (bi.has_key ? 'Key saved, turned off · ' : 'No key yet · ')) + esc(biPrice)
+      + (d.tracking_since ? ' · recording since ' + esc(day(d.tracking_since)) : '') + (t.est ? ' · ' + n(t.est) + ' calls estimated' : '') + '</span></div>'
+      + '<a class="btn btn-g btn-s" href="#/settings">' + (bi.has_key ? 'Change' : 'Set it up') + '</a></div>',
+    { right: '<span class="dim" style="font-size:11.5px">Costs</span>' + seg('aiscope', sc, [['builtin', 'Built-in AI'], ['own', 'Customers’ keys'], ['all', 'Both']]) });
+  if (!d.tracking_since) h += '<div class="banner info"><svg><use href="#i-spark"/></svg><span>No AI calls recorded yet.</span></div>';
   h += '<div class="grid g6">'
     + kpi({ label: sc === 'builtin' ? 'Built-in AI cost' : sc === 'own' ? 'Cost on customers’ keys' : 'AI cost', icon: 'i-spark', value: usd(t.cost), hero: true, sub: usd(t.per_day) + ' a day on average' })
     + kpi({ label: 'At this pace, a month', icon: 'i-coin', value: usd(t.projected_month) })
@@ -2899,21 +3027,21 @@ V.ai = function (d) {
         + '</tbody></table></div>' : empty('No calls yet'), { flush: true, hint: 'per 1M tokens' })
     + card('What the AI is used for', bars(d.purposes.map((p) => [esc(p.key) + ' <span class="dim">· ' + n(p.calls) + ' calls</span>', p.cost]), usd, 'linear-gradient(90deg,#c084fc,#e9a8ff)'))
     + '</div>';
-  h += card('Cost per account', d.accounts.length ? '<div class="tw"><table class="t"><thead><tr><th>Account</th><th class="r">Calls</th><th class="r">Failed</th><th class="r">Tokens in</th><th class="r">Tokens out</th><th class="r">Avg wait</th><th>Models</th><th class="r">Cost</th></tr></thead><tbody>'
+  h += card('Cost per account', d.accounts.length ? '<div class="tw"><table class="t" data-per="15"><thead><tr><th>Account</th><th class="r">Calls</th><th class="r">Failed</th><th class="r">Tokens in</th><th class="r">Tokens out</th><th class="r">Avg wait</th><th>Models</th><th class="r">Cost</th></tr></thead><tbody>'
       + d.accounts.map((r) => '<tr' + (r.acc.id ? ' data-acc="' + r.acc.id + '"' : '') + '><td>' + who(r.acc, r.acc.guest ? 'Guest' : (r.acc.username ? '@' + r.acc.username : '')) + '</td><td class="r num">' + n(r.calls) + '</td>'
         + '<td class="r num">' + (r.errors ? '<span class="chip ' + (r.errors / r.calls > 0.3 ? 'bad' : 'warn') + '">' + pct(r.errors, r.calls) + '</span>' : '<span class="dim">0</span>') + '</td>'
         + '<td class="r num">' + compact(r.in) + '</td><td class="r num">' + compact(r.out) + '</td><td class="r num dim">' + (r.lat / 1000).toFixed(1) + 's</td>'
         + '<td class="dim clip" style="max-width:220px">' + esc(Object.keys(r.models).join(', ')) + '</td><td class="r num"><b>' + usd(r.cost) + '</b></td></tr>').join('')
       + '</tbody></table></div>' : empty('No calls in this period'), { flush: true, right: '<a class="btn btn-g btn-s" href="?api=export&what=ai&range=' + d.range + '"><svg><use href="#i-down"/></svg>Export CSV</a>' });
   const st = d.setup;
-  h += '<div class="grid g2">'
+  h += '<div class="grid g2" style="align-items:start">'
     + card('Recent failures', d.errors.length ? '<div class="tw"><table class="t"><thead><tr><th>When</th><th>Account</th><th>Model</th><th>Error</th></tr></thead><tbody>'
         + d.errors.slice(0, 15).map((e) => '<tr' + (+e.account_id ? ' data-acc="' + e.account_id + '"' : '') + '><td class="dim" style="white-space:nowrap">' + esc(ago(e.created_at)) + '</td><td>' + esc(e.who) + '</td><td class="mono dim">' + esc(e.model) + '</td><td class="clip" title="' + esc(e.error) + '">' + esc(e.error) + '</td></tr>').join('')
         + '</tbody></table></div>' : empty('No failures', 'Every recorded call went through.'), { flush: true })
     + card('How accounts are set up', '<dl class="kv">'
         + ps.map((p) => '<dt>Accounts with a ' + PROV[p][0] + ' key</dt><dd class="num">' + n(st.keys[p] || 0) + '</dd>').join('')
         + Object.entries(st.active).map((x) => '<dt>Using ' + esc(provName(x[0])) + (x[0] === 'builtin' ? '' : ' by default') + '</dt><dd class="num">' + n(x[1]) + '</dd>').join('')
-        + '</dl><div style="margin-top:16px">' + bars(Object.entries(st.agent_models).map((x) => ['<span class="mono">' + esc(x[0]) + '</span>', x[1]])) + '</div><p class="dim" style="font-size:12px;margin:10px 0 0">Models chosen by active agents.</p>')
+        + '</dl><div style="margin-top:16px">' + bars(Object.entries(st.agent_models).map((x) => ['<span class="mono">' + esc(x[0] === 'builtin' ? 'Built-in AI' : x[0]) + '</span>', x[1]])) + '</div><p class="dim" style="font-size:12px;margin:10px 0 0">Models chosen by active agents.</p>')
     + '</div>';
   return h;
 };
@@ -2945,7 +3073,7 @@ V.revenue = function (d) {
     + card('By channel', bars(Object.entries(d.channels).map((x) => [esc(x[0] === 'direct' ? 'Direct chats' : x[0].charAt(0).toUpperCase() + x[0].slice(1)), x[1]]), (v) => usd(v, 1)))
     + card('By currency', d.currencies.length ? '<dl class="kv">' + d.currencies.map((c) => '<dt>' + esc(c.cur) + ' · ' + plural(c.n, 'order') + '</dt><dd class="num">' + n(c.amount) + ' ' + esc(c.cur) + (c.converted ? (c.cur !== 'USD' ? ' <span class="dim">≈ ' + usd(c.usd) + '</span>' : '') : ' <span class="chip warn">no rate</span>') + '</dd>').join('') + '</dl>' : empty('No sales yet'))
     + '</div></div>';
-  h += card('Latest orders', d.recent.length ? '<div class="tw"><table class="t"><thead><tr><th>When</th><th>Seller</th><th>Customer</th><th>Product</th><th>Channel</th><th class="r">Amount</th><th>Status</th></tr></thead><tbody>'
+  h += card('Latest orders', d.recent.length ? '<div class="tw"><table class="t" data-per="15"><thead><tr><th>When</th><th>Seller</th><th>Customer</th><th>Product</th><th>Channel</th><th class="r">Amount</th><th>Status</th></tr></thead><tbody>'
       + d.recent.map((r) => '<tr data-acc="' + r.account_id + '"><td class="dim" style="white-space:nowrap">' + esc(when(r.created_at)) + '</td><td>' + esc(r.acc ? r.acc.name : '#' + r.account_id) + '</td><td>' + esc(r.customer || '—') + '</td>'
         + '<td class="clip">' + esc(r.product || 'Custom order') + '</td><td>' + (r.channel ? plat(r.channel) : '<span class="dim">—</span>') + '</td><td class="r num">' + esc((r.amount || '') + ' ' + (r.currency || '')) + '</td>'
         + '<td>' + (r.paid ? '<span class="chip ok">Paid</span>' : '<span class="chip">' + esc(r.status) + '</span>') + '</td></tr>').join('')
@@ -2964,23 +3092,35 @@ V.messages = function (d) {
     + kpi({ label: 'Written by agents', icon: 'i-spark', value: compact(t.ai), sub: pct(t.ai, all) + ' of all messages', spark: s.ai, sparkColor: C.ai })
     + kpi({ label: 'Failed to send', icon: 'i-alert', value: n(t.failed + t.outbox_failed), sub: n(t.failed) + ' in chats · ' + n(t.outbox_failed) + ' queued' })
     + '</div>';
-  h += '<div class="grid g21">'
-    + card('Messages by channel', chart({ labels: s.labels, stacked: true, series: [{ name: 'Telegram', color: C.tg, values: s.telegram, type: 'bar' }, { name: 'Discord', color: C.dc, values: s.discord, type: 'bar' }, { name: 'Direct', color: C.dm, values: s.direct, type: 'bar' }, { name: 'By agents', color: C.ai, values: s.ai, fill: false, dash: true }], emptyText: 'No messages in this period' }),
+  const busy = d.busy.length ? '<div class="rank" data-per="5">' + d.busy.map((b, i) => '<a data-open="' + esc(b.conv) + '" data-oacc="' + (b.acc ? b.acc.id : 0) + '" style="cursor:pointer"><span class="n">' + (i + 1) + '</span>'
+      + '<span class="rk">' + platIco(b.platform) + '<span class="clip1">' + esc(b.name) + ' <span class="dim">· ' + esc(b.acc ? b.acc.name : '—') + '</span></span></span><b>' + n(b.n) + '</b></a>').join('') + '</div>'
+    : empty('No conversations in this period');
+  h += '<div class="grid g21" style="align-items:start">'
+    + card('Messages by channel', chart({ labels: s.labels, size: 'lg', stacked: true, series: [{ name: 'Telegram', color: C.tg, values: s.telegram, type: 'bar' }, { name: 'Discord', color: C.dc, values: s.discord, type: 'bar' }, { name: 'Direct', color: C.dm, values: s.direct, type: 'bar' }, { name: 'By agents', color: C.ai, values: s.ai, fill: false, dash: true }], emptyText: 'No messages in this period' }),
         { right: legend([['Telegram', C.tg], ['Discord', C.dc], ['Direct', C.dm], ['By agents', C.ai]]) })
-    + card('When people write', heatmap(d.heat), { hint: 'by weekday and hour, server time' })
-    + '</div>';
-  h += card('Busiest conversations', d.busy.length ? '<div class="tw"><table class="t"><thead><tr><th>Conversation</th><th>Seller</th><th>Channel</th><th class="r">Messages</th></tr></thead><tbody>'
-      + d.busy.map((b) => '<tr data-open="' + esc(b.conv) + '" data-oacc="' + (b.acc ? b.acc.id : 0) + '"><td>' + esc(b.name) + '</td><td>' + esc(b.acc ? b.acc.name : '—') + '</td><td>' + plat(b.platform) + '</td><td class="r num">' + n(b.n) + '</td></tr>').join('')
-      + '</tbody></table></div>' : empty('No conversations in this period'), { flush: true });
+    + '<div class="grid" style="align-content:start">'
+    + card('When people write', heatmap(d.heat), { hint: 'weekday × hour' })
+    + card('Busiest conversations', busy, { flush: true })
+    + '</div></div>';
   const m = S.msg;
-  h += card('Latest messages', '<div class="toolbar" style="padding:0 16px 10px">' + tabs('mrole', m.role, [['', 'All'], ['in', 'From customers'], ['out', 'Sent'], ['ai', 'By agents']])
-      + '<span class="grow"></span><input class="inp" id="msg-q" placeholder="Search the last 30 days" value="' + esc(m.q) + '"></div>'
-      + (d.stream.length ? '<div class="tw"><table class="t"><thead><tr><th>When</th><th>Seller</th><th>Conversation</th><th>From</th><th>Message</th></tr></thead><tbody>'
-        + d.stream.map((x) => '<tr data-open="' + esc(x.conv_id) + '" data-oacc="' + x.account_id + '"><td class="dim" style="white-space:nowrap">' + esc(ago(x.created_at)) + '</td><td>' + esc(x.owner ? x.owner.name : '#' + x.account_id) + '</td>'
-          + '<td class="clip" style="max-width:180px">' + (x.platform ? plat(x.platform) + ' ' : '') + esc(x.cname || x.conv_id) + '</td>'
-          + '<td>' + (x.role === 'in' ? '<span class="chip">Customer</span>' : x.agent_name ? '<span class="chip" style="color:#f0c6ff">' + esc(x.agent_name) + '</span>' : '<span class="chip info">Seller</span>') + '</td>'
-          + '<td class="clip" style="max-width:420px">' + (x.media_type ? '<span class="chip">' + esc(x.media_type) + '</span> ' : '') + esc(x.content) + '</td></tr>').join('')
-        + '</tbody></table></div>' : empty('No messages found', m.q ? 'Nothing in the last 30 days matches.' : '')), { flush: true, hint: 'Telegram and Discord. Direct chats are end-to-end encrypted.' });
+  // One line per conversation, the one with the newest message on top.
+  const fresh = (t) => Date.now() - S.skew - parseT(t) < 300000;
+  const fromChip = (x) => x.role === 'in' ? '<span class="chip">Customer</span>' : x.agent_name ? '<span class="chip ai">' + esc(x.agent_name) + '</span>' : '<span class="chip info">Seller</span>';
+  const list = d.convs.length ? '<div class="tw"><table class="t mconv" data-nopage><thead><tr><th>Conversation</th><th>Seller</th><th>Latest message</th><th class="r">30 days</th><th class="r">Last</th></tr></thead><tbody>'
+      + d.convs.map((x) => '<tr data-open="' + esc(x.conv_id) + '" data-oacc="' + x.account_id + '">'
+        + '<td class="clip" style="max-width:220px"><span class="mc">' + (fresh(x.created_at) ? '<i class="newdot" title="In the last 5 minutes"></i>' : '') + platIco(x.platform) + '<b>' + esc(x.name) + '</b>' + (x.handle ? ' <span class="dim">' + esc(x.handle) + '</span>' : '') + '</span></td>'
+        + '<td class="clip dim" style="max-width:150px">' + esc(x.owner ? x.owner.name : '#' + x.account_id) + '</td>'
+        + '<td class="clip" style="max-width:460px">' + fromChip(x) + ' ' + (x.media_type ? '<span class="chip">' + esc(x.media_type) + '</span> ' : '') + '<span class="mt">' + esc(x.content || '') + '</span></td>'
+        + '<td class="r num dim" title="' + n(x.n_in) + ' from the customer">' + n(x.n) + '</td>'
+        + '<td class="r dim" style="white-space:nowrap">' + esc(ago(x.created_at)) + '</td></tr>').join('')
+      + '</tbody></table></div>'
+      + (d.pages > 1 ? '<div class="pager"><span>' + n((d.page - 1) * d.per + 1) + '–' + n(Math.min(d.conv_total, d.page * d.per)) + ' of ' + n(d.conv_total) + ' conversations</span><span class="sp"></span>'
+        + '<button class="btn btn-g btn-s" data-mpage="' + (d.page - 1) + '"' + (d.page <= 1 ? ' disabled' : '') + '>Previous</button><span>Page ' + d.page + ' of ' + d.pages + '</span>'
+        + '<button class="btn btn-g btn-s" data-mpage="' + (d.page + 1) + '"' + (d.page >= d.pages ? ' disabled' : '') + '>Next</button></div>' : '')
+    : empty('No messages found', m.q ? 'Nothing in the last 30 days matches.' : '');
+  h += card('Latest messages', '<div class="toolbar" style="padding:0 14px 8px">' + tabs('mrole', m.role, [['', 'All'], ['in', 'From customers'], ['out', 'Sent'], ['ai', 'By agents']])
+      + '<span class="grow"></span><input class="inp" id="msg-q" placeholder="Search the last 30 days" value="' + esc(m.q) + '"></div>' + list,
+    { flush: true, hint: n(d.conv_total) + ' conversations · newest first · direct chats are encrypted' });
   return h;
 };
 
@@ -3006,7 +3146,7 @@ V.system = function (d) {
     + kpi({ label: 'Memory files', icon: 'i-list', value: compact(d.memory.files) + (d.memory.capped ? '+' : ''), sub: bytes(d.memory.bytes) })
     + '</div>';
   h += '<div class="grid g2">'
-    + card('Background queues', '<div class="tw"><table class="t"><tbody>' + d.queues.map((q) => {
+    + card('Background queues', '<div class="tw"><table class="t" data-nopage><tbody>' + d.queues.map((q) => {
         const warn = /overdue|failed/i.test(q.label) && q.n > 0;
         return '<tr><td>' + esc(q.label) + '</td><td class="r"><span class="chip ' + (warn ? 'bad' : q.n ? 'info' : '') + '">' + n(q.n) + '</span></td></tr>';
       }).join('') + '</tbody></table></div>', { flush: true })
@@ -3020,7 +3160,7 @@ V.system = function (d) {
         + '<td>' + botState(b) + '</td><td>' + (b.token ? '<span class="chip ok">Saved</span>' : '<span class="chip bad">None</span>') + '</td>'
         + '<td class="dim">' + esc(b.polled_at ? ago(b.polled_at) : 'never') + '</td><td class="r num">' + (b.error ? n(b.fails) : '<span class="dim">0</span>') + '</td><td class="clip dim" title="' + esc(b.error || '') + '">' + esc(b.error || '—') + '</td></tr>').join('')
       + '</tbody></table></div>' : empty('No bots connected'), { flush: true, hint: 'errors shown only while they still apply' });
-  h += '<div class="grid g2">'
+  h += '<div class="grid g2" style="align-items:start">'
     + card('Largest tables', '<div class="tw"><table class="t"><thead><tr><th>Table</th><th class="r">Rows</th><th class="r">Size</th></tr></thead><tbody>'
         + d.db.tables.slice(0, 18).map((x) => '<tr><td class="mono">' + esc(x.name) + '</td><td class="r num">~' + compact(x.n) + '</td><td class="r num">' + bytes(+x.d + +x.i) + '</td></tr>').join('') + '</tbody></table></div>', { flush: true })
     + card('Schema changes that failed', d.migrate_log ? '<pre class="pre">' + esc(d.migrate_log) + '</pre>' : empty('None', 'migrate.log is empty.'), { hint: 'migrate.log' })
@@ -3032,7 +3172,7 @@ V.audit = function (d) {
   const L = { login: 'Signed in', logout: 'Signed out', suspend: 'Suspended', unsuspend: 'Unsuspended', delete: 'Deleted', impersonate: 'Opened app as', reset_password: 'Password reset', bots_off: 'Bots off',
     clear_cooldowns: 'Cooldowns cleared', clear_limits: 'Limits reset', host_prefs: 'Contact page', purge_guests: 'Guests removed', llm_pause: 'AI switch', settings: 'Settings', builtin_llm: 'Built-in AI' };
   if (!d.rows.length) return card('', empty('Nothing yet', 'Actions taken here are listed as you make them.'));
-  return card('', '<div class="tw"><table class="t"><thead><tr><th>When</th><th>Action</th><th>Account</th><th>Detail</th><th>From</th></tr></thead><tbody>'
+  return card('', '<div class="tw"><table class="t" data-per="20"><thead><tr><th>When</th><th>Action</th><th>Account</th><th>Detail</th><th>From</th></tr></thead><tbody>'
     + d.rows.map((r) => '<tr' + (r.target && r.target.username ? ' data-acc="' + r.target.id + '"' : '') + '><td class="dim" style="white-space:nowrap">' + esc(when(r.created_at)) + '</td><td><span class="chip ' + (/delete|suspend$/.test(r.action) ? 'bad' : r.action === 'impersonate' ? 'warn' : 'info') + '">' + esc(L[r.action] || r.action) + '</span></td>'
       + '<td>' + (r.target ? esc(r.target.name) : '<span class="dim">—</span>') + '</td><td>' + esc(r.detail) + '</td><td class="mono dim">' + esc(r.ip) + '</td></tr>').join('')
     + '</tbody></table></div>', { flush: true });
@@ -3134,6 +3274,7 @@ function renderDrawer() {
     ['direct', 'Direct chats', d.threads.length], ['safety', 'Safety', d.risk.reasons.length || null], ['notes', 'Notes']]) + '</div>';
   h += '<div class="dr-b">' + (DT[S.dtab] || DT.overview)(d) + '</div>';
   dr.innerHTML = h;
+  paginate(dr, 'dr:' + S.dtab);
   $('.dr-b', dr).scrollTop = keepScroll;
 }
 const DT = {};
@@ -3160,7 +3301,7 @@ DT.overview = function (d) {
       + '</dl>')
     + '</div>';
   if (d.agents.length) h += card('Agents', '<div class="tw"><table class="t"><thead><tr><th>Agent</th><th>Model</th><th class="r">Replies</th><th class="r">Chats</th><th>State</th></tr></thead><tbody>'
-    + d.agents.map((g) => '<tr><td>' + esc(g.name) + '</td><td class="mono dim">' + esc(g.model || 'default') + '</td><td class="r num">' + n(g.replies) + '</td><td class="r num">' + n(g.conv) + '</td><td>' + (+g.active ? '<span class="chip ok">Active</span>' : '<span class="chip">Off</span>') + '</td></tr>').join('')
+    + d.agents.map((g) => '<tr><td>' + esc(g.name) + '</td><td class="mono dim">' + esc(g.model === 'builtin' ? 'Built-in AI' : (g.model || 'default')) + '</td><td class="r num">' + n(g.replies) + '</td><td class="r num">' + n(g.conv) + '</td><td>' + (+g.active ? '<span class="chip ok">Active</span>' : '<span class="chip">Off</span>') + '</td></tr>').join('')
     + '</tbody></table></div>', { flush: true });
   if (d.products.length) h += card('Products', '<div class="tw"><table class="t"><thead><tr><th>Product</th><th>Type</th><th class="r">Price</th><th>Billing</th><th class="r">Stock</th><th>Agents sell it</th></tr></thead><tbody>'
     + d.products.map((p) => '<tr><td class="clip">' + esc(p.name) + '</td><td class="dim">' + esc(p.type) + '</td><td class="r num">' + esc(p.price) + ' ' + esc(p.currency || '') + '</td><td class="dim">' + esc(p.billing || '—') + '</td><td class="r num">' + esc(p.stock) + '</td><td>' + (+p.enabled ? '<span class="chip ok">Yes</span>' : '<span class="chip">No</span>') + '</td></tr>').join('')
@@ -3267,6 +3408,7 @@ function route() {
 }
 function go(view, quiet) {
   const changed = S.view !== view || !S.data;
+  if (S.view !== view) S.pg = {};
   S.view = view;
   $$('.nav a').forEach((a) => a.setAttribute('aria-current', a.dataset.v === view ? 'page' : 'false'));
   $('#title').textContent = VIEWS[view][0];
@@ -3280,7 +3422,7 @@ function params() {
   switch (S.view) {
     case 'accounts': return { type: S.acc.type, sort: S.acc.sort, dir: S.acc.dir, page: S.acc.page, q: S.acc.q };
     case 'guests': return { filter: S.guests.filter, q: S.guests.q };
-    case 'messages': return { range: S.ranges.messages, q: S.msg.q, role: S.msg.role };
+    case 'messages': return { range: S.ranges.messages, q: S.msg.q, role: S.msg.role, page: S.msg.page || 1 };
     case 'ai': case 'revenue': return { range: S.ranges[S.view] };
     default: return {};
   }
@@ -3304,7 +3446,51 @@ function render(silent) {
   const y = window.scrollY;
   S.charts = {}; S.chartN = 0;
   $('#page').innerHTML = V[S.view](S.data);
+  paginate($('#page'), S.view);
   if (silent) window.scrollTo(0, y);
+}
+
+// ── Pages for long lists ─────────────────────────────────────
+// Every table, feed and ranking with more rows than fit is shown a page
+// at a time, with a small pager under it. Which page each list is on is
+// kept (by view and card title) across live refreshes.
+const PG_PER = { tr: 10, ev: 8, a: 8 };
+function paginate(root, prefix) {
+  const seen = {};
+  $$('table.t:not([data-nopage]):not(.price-t) > tbody, .feed, .rank', root).forEach((box) => {
+    const kind = box.tagName === 'TBODY' ? 'tr' : box.classList.contains('feed') ? 'ev' : 'a';
+    const title = (box.closest('.card') && $('.card-h h2', box.closest('.card'))) ? $('.card-h h2', box.closest('.card')).textContent : 'list';
+    let key = prefix + ':' + title;
+    seen[key] = (seen[key] || 0) + 1;
+    if (seen[key] > 1) key += ':' + seen[key];
+    box.dataset.pgk = key;
+    pageBox(box);
+  });
+}
+function pageBox(box) {
+  const kind = box.tagName === 'TBODY' ? 'tr' : box.classList.contains('feed') ? 'ev' : 'a';
+  const items = Array.from(box.children);
+  const per = +(box.closest('[data-per]') || {}).dataset?.per || PG_PER[kind];
+  const host = box.tagName === 'TBODY' ? (box.closest('.tw') || box.closest('table')) : box;
+  const old = host.nextElementSibling && host.nextElementSibling.classList.contains('pg') ? host.nextElementSibling : null;
+  const key = box.dataset.pgk;
+  if (items.length <= per) { items.forEach((x) => { x.hidden = false; }); if (old) old.remove(); return; }
+  const pages = Math.ceil(items.length / per);
+  const p = Math.min(Math.max(1, S.pg[key] || 1), pages);
+  S.pg[key] = p;
+  items.forEach((x, i) => { x.hidden = i < (p - 1) * per || i >= p * per; });
+  const bar = document.createElement('div');
+  bar.className = 'pager pg';
+  bar.innerHTML = '<span>' + n((p - 1) * per + 1) + '–' + n(Math.min(items.length, p * per)) + ' of ' + n(items.length) + '</span><span class="sp"></span>'
+    + '<button class="btn btn-g btn-s btn-i" data-pg="' + esc(key) + '" data-p="' + (p - 1) + '" title="Previous page"' + (p <= 1 ? ' disabled' : '') + '>‹</button>'
+    + '<span class="pgn">' + p + ' / ' + pages + '</span>'
+    + '<button class="btn btn-g btn-s btn-i" data-pg="' + esc(key) + '" data-p="' + (p + 1) + '" title="Next page"' + (p >= pages ? ' disabled' : '') + '>›</button>';
+  if (old) old.replaceWith(bar); else host.after(bar);
+}
+function pageTo(key, p) {
+  S.pg[key] = p;
+  const box = $$('[data-pgk]').find((b) => b.dataset.pgk === key);
+  if (box) pageBox(box);
 }
 function busyTyping() { const a = document.activeElement; return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.id !== 'gsearch'; }
 async function refreshLive() {
@@ -3417,12 +3603,16 @@ document.addEventListener('click', async (e) => {
     const k = tab.dataset.tab, v = tab.dataset.val;
     if (k === 'acctype') { S.acc.type = v; S.acc.page = 1; history.replaceState(null, '', '#/accounts' + viewQuery()); load(); }
     else if (k === 'gfilter') { S.guests.filter = v; load(); }
-    else if (k === 'mrole') { S.msg.role = v; load(); }
+    else if (k === 'mrole') { S.msg.role = v; S.msg.page = 1; load(); }
     else if (k === 'dtab') { S.dtab = v; renderDrawer(); $('.dr-b').scrollTop = 0; }
     return;
   }
   const sortTh = t.closest('th[data-sort]');
   if (sortTh) { const k = sortTh.dataset.sort; if (S.acc.sort === k) S.acc.dir = S.acc.dir === 'asc' ? 'desc' : 'asc'; else { S.acc.sort = k; S.acc.dir = k === 'name' ? 'asc' : 'desc'; } S.acc.page = 1; load(); return; }
+  const mp = t.closest('[data-mpage]');
+  if (mp) { S.msg.page = Math.max(1, +mp.dataset.mpage); load(true); return; }
+  const pgb = t.closest('[data-pg]');
+  if (pgb) { pageTo(pgb.dataset.pg, +pgb.dataset.p); return; }
   const pg = t.closest('[data-page]');
   if (pg) { S.acc.page = +pg.dataset.page; load(); window.scrollTo(0, 0); return; }
   const kg = t.closest('.kpi[data-go]');
@@ -3466,7 +3656,7 @@ document.addEventListener('click', async (e) => {
     }
     return;
   }
-  const open = t.closest('tr[data-open]');
+  const open = t.closest('[data-open]');
   if (open) { openConversation(+open.dataset.oacc, open.dataset.open); return; }
   if (t.closest('[data-stop]')) return;
   const accEl = t.closest('[data-acc]');
@@ -3488,7 +3678,7 @@ document.addEventListener('input', (e) => {
     qT = setTimeout(() => {
       if (id === 'acc-q') { S.acc.q = e.target.value; S.acc.page = 1; }
       if (id === 'guest-q') S.guests.q = e.target.value;
-      if (id === 'msg-q') S.msg.q = e.target.value;
+      if (id === 'msg-q') { S.msg.q = e.target.value; S.msg.page = 1; }
       const pos = e.target.selectionStart;
       load(true).then(() => { const el = $('#' + id); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (x) {} } });
     }, id === 'msg-q' ? 450 : 250);

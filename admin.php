@@ -1781,7 +1781,7 @@ function a_action(string $act, array $b): array {
         case 'llm_pause': {
             $on = !empty($b['on']);
             a_setting_set('llm_pause', $on ? '1' : '0');
-            a_audit('llm_pause', null, $on ? 'Paused all AI calls' : 'Resumed AI calls');
+            a_audit('llm_pause', null, $on ? 'Paused agent replies for everyone' : 'Resumed agent replies');
             return ['ok' => true, 'paused' => $on];
         }
         case 'ai_scope': {
@@ -2447,6 +2447,51 @@ table.t { font-size: 12.5px; }
 .chat::-webkit-scrollbar-thumb, .dr-b::-webkit-scrollbar-thumb, .tw::-webkit-scrollbar-thumb, .modal::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
 .chat::-webkit-scrollbar-track, .dr-b::-webkit-scrollbar-track, .tw::-webkit-scrollbar-track, .modal::-webkit-scrollbar-track { background: transparent; }
 
+/* Sidebar: agent replies on / paused for everyone */
+.ai-sw { padding: 9px 10px; border-radius: 9px; gap: 8px; }
+.ai-sw .lbl { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--t3); font-weight: 600; margin-bottom: 2px; }
+.ai-sw b { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; color: var(--t1); }
+.ai-sw.paused { border-color: rgba(255,93,108,.28); background: rgba(255,93,108,.05); }
+.dot.bad { background: var(--bad); }
+
+/* Account details: a centred popup, not a slide-out */
+.drawer { top: 50%; left: 50%; right: auto; bottom: auto; width: min(1040px, calc(100vw - 40px)); height: min(880px, calc(100vh - 48px));
+  border: 1px solid var(--ln2); border-radius: 12px; overflow: hidden; box-shadow: 0 40px 100px -30px rgba(0,0,0,.95);
+  transform: translate(-50%, -48%) scale(.985); opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity .18s ease, transform .22s cubic-bezier(.16,1,.3,1), visibility 0s linear .22s; }
+.drawer.on { transform: translate(-50%, -50%); opacity: 1; visibility: visible; pointer-events: auto; transition: opacity .18s ease, transform .22s cubic-bezier(.16,1,.3,1); }
+.scrim { background: rgba(1,5,9,.62); }
+@media (max-width: 700px) { .drawer { width: 100vw; height: 100vh; border-radius: 0; border: 0; } }
+
+/* Settings: tabs, then short form rows */
+.settings-bar { gap: 12px; max-width: 920px; }
+.settings-bar .dirty { font-size: 11.5px; color: var(--warn); }
+.fsec { max-width: 920px; }
+.fsec .card-b { padding: 6px 18px 10px; }
+.flead { margin: 10px 0 4px; font-size: 12.5px; color: var(--t2); }
+.frow { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); gap: 16px; align-items: center; padding: 12px 0; border-top: 1px solid rgba(255,255,255,.045); }
+.flead + .frow, .fsec .card-b > .frow:first-child { border-top: 0; }
+.frow.ftop { align-items: start; }
+.fl b { display: block; font-size: 12.5px; font-weight: 600; color: var(--t1); }
+.fl span { display: block; font-size: 11.5px; color: var(--t3); margin-top: 1px; }
+.fc { display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; }
+.fc.col { flex-direction: column; align-items: flex-end; }
+.fc .inp { width: 280px; max-width: 100%; height: 32px; }
+.fc select.inp { width: 280px; }
+.fin { display: inline-flex; align-items: center; gap: 8px; }
+.fin .inp { width: 96px; text-align: right; }
+.fin span { font-size: 12px; color: var(--t3); min-width: 26px; }
+.fv { font-size: 12.5px; color: var(--t1); }
+.st { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--t1); }
+.st.bad { color: #f0a3ab; }
+.fx-t { width: auto; }
+.fx-t td { padding: 4px 4px; border: 0; }
+.fx-t .inp { width: 110px; }
+.fx-t input[data-f="cur"] { width: 80px; }
+.price-t th { background: none; }
+.price-t td { border-bottom-color: rgba(255,255,255,.035); }
+@media (max-width: 760px) { .frow { grid-template-columns: minmax(0, 1fr); gap: 8px; } .fc, .fc.col { justify-content: flex-start; align-items: flex-start; } }
+
 @media (max-width: 1280px) { .g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1080px) { .g21, .g12, .g3 { grid-template-columns: minmax(0, 1fr); } .search .inp { width: 180px; } }
 @media (max-width: 860px) {
@@ -2561,9 +2606,9 @@ table.t { font-size: 12.5px; }
       <a href="#/settings" data-v="settings"><svg><use href="#i-gear"/></svg>Settings</a>
     </nav>
     <div class="side-foot">
-      <div class="ai-sw">
-        <div><b id="ai-state">AI is running</b><span id="ai-sub">Agents reply as normal</span></div>
-        <button class="sw danger" id="ai-pause" role="switch" aria-checked="false" aria-label="Pause all AI" style="margin-left:auto"></button>
+      <div class="ai-sw" id="ai-box">
+        <div><span class="lbl">Agent replies</span><b id="ai-state"><i class="dot on"></i>On for everyone</b></div>
+        <button class="btn btn-g btn-s" id="ai-pause" data-paused="0" title="Stop every agent on every account from replying" style="margin-left:auto">Pause all</button>
       </div>
       <div class="me"><span class="av" style="background:linear-gradient(145deg,#0d2a33,#0b1a31)"><svg width="14" height="14"><use href="#i-user"/></svg></span><?= $h(ADMIN_USERNAME) ?><a href="?logout=1">Sign out</a></div>
     </div>
@@ -2617,7 +2662,7 @@ const VIEWS = {
   messages: ['Messages', 'Volume on every channel, and the latest messages'],
   system: ['System health', 'Bots, background queues, database and server'],
   audit: ['Audit log', 'Everything done from this console'],
-  settings: ['Settings', 'Built-in AI, prices, currencies, your take rate and live updates'],
+  settings: ['Settings', 'Built-in AI, prices, general options and security'],
 };
 const RANGED = { ai: 1, revenue: 1, messages: 1 };
 
@@ -2956,7 +3001,7 @@ const V = {};
 V.overview = function (d) {
   const k = d.kpi, s = d.series;
   let h = '';
-  if (k.llm_paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>All AI calls are paused.</b> Agents on every account are silent until you resume them.</span><button class="btn btn-g btn-s" data-act="resume-ai">Resume AI</button></div>';
+  if (k.llm_paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>Agent replies are paused for everyone.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume</button></div>';
   if (S.boot && !S.boot.api_patched) h += '<div class="banner"><svg><use href="#i-alert"/></svg><span>The api.php on the server is the old one, so AI calls aren’t being recorded and suspensions don’t take effect. Upload the new api.php.</span></div>';
   const msgs = s.telegram.map((v, i) => v + s.discord[i] + s.direct[i]);
   h += '<div class="grid g6">'
@@ -3103,7 +3148,7 @@ V.risk = function (d) {
 V.ai = function (d) {
   const t = d.totals, s = d.series;
   let h = '';
-  if (d.paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>All AI calls are paused.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume AI</button></div>';
+  if (d.paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>Agent replies are paused for everyone.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume</button></div>';
   const sc = d.scope || 'builtin', bi = d.builtin || {};
   // One header card: the built-in AI's state, and whose costs this page counts
   // (your built-in AI by default; customers' own keys only when you ask).
@@ -3250,7 +3295,7 @@ V.system = function (d) {
   const r = d.relay;
   let h = '';
   if (!d.php.api_patched) h += '<div class="banner"><svg><use href="#i-alert"/></svg><span>The api.php next to this console is the old one: AI calls aren’t recorded, suspensions and the AI pause don’t take effect. Upload the new api.php.</span></div>';
-  if (d.paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>All AI calls are paused.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume AI</button></div>';
+  if (d.paused) h += '<div class="banner bad"><svg><use href="#i-pause"/></svg><span><b>Agent replies are paused for everyone.</b></span><button class="btn btn-g btn-s" data-act="resume-ai">Resume</button></div>';
   const bad = d.queues.filter((q) => /overdue|failed/i.test(q.label) && q.n > 0).length;
   h += '<div class="grid g6">'
     + kpi({ label: 'Bots running', icon: 'i-bot', value: n(r.on), hero: true, sub: n(r.off) + ' turned off' + (r.desktop ? ' · ' + n(r.desktop) + ' on the desktop app' : '') })
@@ -3285,7 +3330,7 @@ V.system = function (d) {
 
 V.audit = function (d) {
   const L = { login: 'Signed in', logout: 'Signed out', suspend: 'Suspended', unsuspend: 'Unsuspended', delete: 'Deleted', impersonate: 'Opened app as', reset_password: 'Password reset', bots_off: 'Bots off',
-    clear_cooldowns: 'Cooldowns cleared', clear_limits: 'Limits reset', host_prefs: 'Contact page', purge_guests: 'Guests removed', llm_pause: 'AI switch', settings: 'Settings', builtin_llm: 'Built-in AI' };
+    clear_cooldowns: 'Cooldowns cleared', clear_limits: 'Limits reset', host_prefs: 'Contact page', purge_guests: 'Guests removed', llm_pause: 'Agent replies', settings: 'Settings', builtin_llm: 'Built-in AI' };
   if (!d.rows.length) return card('', empty('Nothing yet', 'Actions taken here are listed as you make them.'));
   return card('', '<div class="tw"><table class="t" data-per="20"><thead><tr><th>When</th><th>Action</th><th>Account</th><th>Detail</th><th>From</th></tr></thead><tbody>'
     + d.rows.map((r) => '<tr' + (r.target && r.target.username ? ' data-acc="' + r.target.id + '"' : '') + '><td class="dim" style="white-space:nowrap">' + esc(when(r.created_at)) + '</td><td><span class="chip ' + (/delete|suspend$/.test(r.action) ? 'bad' : r.action === 'impersonate' ? 'warn' : 'info') + '">' + esc(L[r.action] || r.action) + '</span></td>'
@@ -3297,34 +3342,43 @@ V.settings = function (d) {
   S.set = JSON.parse(JSON.stringify(d));
   S.biClear = false;
   const sec = d.security, bi = d.builtin || {};
-  let h = card('Built-in AI', '<p class="dim" style="margin:0 0 12px;font-size:12.5px">Your own AI key, offered to every account. In the app, accounts choose <b>Built-in AI</b> under Connections → AI provider instead of adding a key of their own. '
-      + 'Calls on it are what you pay for, and are the cost shown across this console. The key stays on the server: it is never sent to the app or back to this page.</p>'
-      + '<div class="row-f"><div class="tx"><b>Offer the built-in AI</b><span>' + (bi.users ? plural(bi.users, 'account') + ' chose it. Turning it off moves them back to their own keys, if they have any.' : 'No account uses it yet.') + '</span></div>'
-      + '<button class="sw" role="switch" id="bi-on" data-act="bi-toggle" aria-checked="' + (bi.on ? 'true' : 'false') + '" aria-label="Offer the built-in AI"></button></div>'
-      + '<div class="row-f"><div class="tx"><b>Provider and model</b><span id="bi-price">' + esc(biPriceText(d.prices, bi.model)) + '</span></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
-      + '<select class="inp" id="bi-prov" style="width:120px;height:32px">' + ['gemini', 'openai', 'claude'].map((x) => '<option value="' + x + '"' + (x === bi.provider ? ' selected' : '') + '>' + PROV[x][0] + '</option>').join('') + '</select>'
-      + '<select class="inp mono" id="bi-model" style="width:230px;height:32px">' + biModelOptions(d.prices, bi.provider, bi.model) + '</select></div></div>'
-      + '<div class="row-f"><div class="tx"><b>API key</b><span>' + (bi.has_key ? 'Saved (' + esc(bi.key_hint) + '). Leave the box empty to keep it.' : 'None saved yet.') + '</span></div><div style="display:flex;gap:8px;align-items:center">'
-      + '<input class="inp mono" id="bi-key" type="password" autocomplete="new-password" placeholder="' + (bi.has_key ? 'Paste a new key to replace it' : 'Paste the API key') + '" style="width:260px;height:32px">'
-      + (bi.has_key ? '<button class="btn btn-g btn-s" data-act="bi-clear" title="Remove the saved key (turns the built-in AI off)">Remove</button>' : '') + '</div></div>'
-      + '<p class="dim" style="font-size:12px;margin:10px 0 0">Saved with <b>Save settings</b> below. Its price comes from the AI prices list.</p>');
-  h += card('Live switches', '<div class="row-f"><div class="tx"><b>Pause all AI</b><span>Every agent on every account stops calling the AI until you turn this off. Customers simply get no reply.</span></div>'
-      + '<button class="sw danger" role="switch" data-act="toggle-ai" aria-checked="' + (d.paused ? 'true' : 'false') + '" aria-label="Pause all AI"></button></div>'
-      + '<div class="row-f"><div class="tx"><b>Live updates every</b><span>How often open pages refresh themselves.</span></div><div style="display:flex;gap:8px;align-items:center"><input class="inp" id="set-refresh" type="number" min="5" max="300" value="' + d.refresh + '" style="width:80px;height:32px"><span class="dim">seconds</span></div></div>'
-      + '<div class="row-f"><div class="tx"><b>Your take rate</b><span>The share of sellers’ sales you count as your earnings (0 hides it). booqi itself doesn’t charge this; it’s for your own figures.</span></div><div style="display:flex;gap:8px;align-items:center"><input class="inp" id="set-take" type="number" min="0" max="100" step="0.1" value="' + d.take_rate + '" style="width:80px;height:32px"><span class="dim">%</span></div></div>');
-  if (d.unpriced.length) h += '<div class="banner"><svg><use href="#i-alert"/></svg><span>' + plural(d.unpriced.length, 'model') + ' in use ' + (d.unpriced.length === 1 ? 'isn’t' : 'aren’t') + ' in the list and ' + (d.unpriced.length === 1 ? 'is' : 'are') + ' priced at a fallback: ' + esc(d.unpriced.map((x) => x.model).join(', ')) + '.</span><button class="btn btn-g btn-s" data-act="add-unpriced">Add ' + (d.unpriced.length === 1 ? 'it' : 'them') + '</button></div>';
-  h += card('AI prices', '<p class="dim" style="margin:0 0 12px;font-size:12.5px">US dollars per million tokens. Defaults are the providers’ list prices when this console was written; check them against the providers’ pricing pages. Cached input is what a cache hit costs.</p>'
-      + '<div class="tw"><table class="t price-t"><thead><tr><th>Model</th><th>Provider</th><th class="r">Input</th><th class="r">Cached input</th><th class="r">Output</th><th></th></tr></thead><tbody id="price-rows">' + priceRows(d.prices) + '</tbody></table></div>'
-      + '<button class="btn btn-g btn-s" data-act="add-price" style="margin-top:10px">Add a model</button>');
-  h += '<div class="grid g2">'
-    + card('Currency rates', '<p class="dim" style="margin:0 0 12px;font-size:12.5px">USD for one unit. Sales in a currency without a rate are listed separately and left out of totals.</p><div class="tw"><table class="t price-t"><tbody id="fx-rows">'
-        + Object.entries(d.fx).map((x) => fxRow(x[0], x[1])).join('') + '</tbody></table></div><button class="btn btn-g btn-s" data-act="add-fx" style="margin-top:10px">Add a currency</button>')
-    + card('Security', '<dl class="kv"><dt>Username</dt><dd>' + esc(sec.username) + '</dd><dt>Password</dt><dd>' + (sec.hashed ? '<span class="chip ok">Stored as a hash</span>' : '<span class="chip warn">Plain text in admin.php</span>') + '</dd>'
-        + '<dt>Address allow-list</dt><dd>' + (sec.allowlist ? plural(sec.allowlist, 'address', 'addresses') : '<span class="chip warn">Off</span>') + '</dd><dt>Your address</dt><dd class="mono">' + esc(sec.ip) + '</dd>'
-        + '<dt>Signed out after</dt><dd>' + sec.hours + ' h, or ' + sec.idle + ' min idle</dd><dt>HTTPS</dt><dd>' + (sec.https ? '<span class="chip ok">Yes</span>' : '<span class="chip bad">No</span>') + '</dd></dl>'
-        + '<p class="dim" style="font-size:12px;margin:12px 0 0">These are set at the top of admin.php. Changing the password there signs every console session out.</p>')
-    + '</div>';
-  h += '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn btn-p" data-act="save-settings"><svg><use href="#i-check"/></svg>Save settings</button></div>';
+  const tab = S.setTab || 'ai';
+  // One form row: label and a short hint on the left, the control on the right.
+  const row = (label, hint, ctrl, id) => '<div class="frow"><div class="fl"><b>' + label + '</b>' + (hint ? '<span' + (id ? ' id="' + id + '"' : '') + '>' + hint + '</span>' : '') + '</div><div class="fc">' + ctrl + '</div></div>';
+  const sect = (id, body) => '<section class="card fsec" data-sec="' + id + '"' + (id === tab ? '' : ' hidden') + '><div class="card-b">' + body + '</div></section>';
+  let h = '<div class="toolbar settings-bar">' + tabs('settab', tab, [['ai', 'Built-in AI'], ['prices', 'AI prices'], ['general', 'General'], ['security', 'Security']])
+    + '<span class="dirty" id="set-dirty" hidden>Unsaved changes</span>'
+    + '<button class="btn btn-p" data-act="save-settings"><svg><use href="#i-check"/></svg>Save changes</button></div>';
+
+  h += sect('ai', '<p class="flead">Let accounts use your AI key instead of their own. You pay for these calls.</p>'
+    + row('Offer to accounts', bi.users ? plural(bi.users, 'account') + ' using it' : 'No accounts using it yet',
+        '<button class="sw" role="switch" id="bi-on" data-act="bi-toggle" aria-checked="' + (bi.on ? 'true' : 'false') + '" aria-label="Offer the built-in AI"></button>')
+    + row('Provider', '', '<select class="inp" id="bi-prov">' + ['gemini', 'openai', 'claude'].map((x) => '<option value="' + x + '"' + (x === bi.provider ? ' selected' : '') + '>' + PROV[x][0] + '</option>').join('') + '</select>')
+    + row('Model', esc(biPriceText(d.prices, bi.model)), '<select class="inp mono" id="bi-model">' + biModelOptions(d.prices, bi.provider, bi.model) + '</select>', 'bi-price')
+    + row('API key', bi.has_key ? 'Saved · ' + esc(bi.key_hint) : 'Not set',
+        '<input class="inp mono" id="bi-key" type="password" autocomplete="new-password" placeholder="' + (bi.has_key ? 'Paste to replace' : 'Paste your API key') + '">'
+        + (bi.has_key ? '<button class="btn btn-g" data-act="bi-clear" title="Remove the saved key">Remove</button>' : '')));
+
+  h += sect('prices', '<p class="flead">US dollars per 1 million tokens. Used for every cost in this console.</p>'
+    + (d.unpriced.length ? '<div class="banner" style="margin-bottom:12px"><svg><use href="#i-alert"/></svg><span>No price for ' + esc(d.unpriced.map((x) => x.model).join(', ')) + '.</span><button class="btn btn-g btn-s" data-act="add-unpriced">Add</button></div>' : '')
+    + '<div class="tw"><table class="t price-t"><thead><tr><th>Model</th><th>Provider</th><th class="r">Input</th><th class="r">Cached</th><th class="r">Output</th><th></th></tr></thead><tbody id="price-rows">' + priceRows(d.prices) + '</tbody></table></div>'
+    + '<button class="btn btn-g btn-s" data-act="add-price" style="margin-top:10px">+ Add model</button>');
+
+  h += sect('general',
+      row('Refresh pages every', 'How often open pages update', '<div class="fin"><input class="inp" id="set-refresh" type="number" min="5" max="300" value="' + d.refresh + '"><span>sec</span></div>')
+    + row('Your take rate', 'Share of sales counted as your earnings. 0 hides it.', '<div class="fin"><input class="inp" id="set-take" type="number" min="0" max="100" step="0.1" value="' + d.take_rate + '"><span>%</span></div>')
+    + '<div class="frow ftop"><div class="fl"><b>Currency rates</b><span>USD for one unit of each currency</span></div><div class="fc col">'
+    + '<div class="tw"><table class="t price-t fx-t"><tbody id="fx-rows">' + Object.entries(d.fx).map((x) => fxRow(x[0], x[1])).join('') + '</tbody></table></div>'
+    + '<button class="btn btn-g btn-s" data-act="add-fx">+ Add currency</button></div></div>');
+
+  const ok = (v, yes, no) => v ? '<span class="st ok"><i class="dot on"></i>' + yes + '</span>' : '<span class="st bad"><i class="dot bad"></i>' + no + '</span>';
+  h += sect('security', '<p class="flead">Read-only. Change these at the top of admin.php.</p>'
+    + row('Username', '', '<span class="fv">' + esc(sec.username) + '</span>')
+    + row('Password', '', ok(sec.hashed, 'Stored as a hash', 'Plain text in admin.php'))
+    + row('HTTPS', '', ok(sec.https, 'On', 'Off'))
+    + row('IP allow-list', '', sec.allowlist ? '<span class="fv">' + plural(sec.allowlist, 'address', 'addresses') + '</span>' : ok(false, '', 'Off'))
+    + row('Your IP', '', '<span class="fv mono">' + esc(sec.ip) + '</span>')
+    + row('Sign-out', '', '<span class="fv">After ' + sec.hours + ' h, or ' + sec.idle + ' min idle</span>'));
   return h;
 };
 // Built-in AI: the models in your price list for a provider (and the one saved, if it isn't listed).
@@ -3651,19 +3705,24 @@ async function boot() {
     setAiSwitch(b.paused);
   } catch (e) {}
 }
+// Sidebar: are agents replying anywhere? One button pauses or resumes them all.
 function setAiSwitch(paused) {
-  $('#ai-pause').setAttribute('aria-checked', paused ? 'true' : 'false');
-  $('#ai-state').textContent = paused ? 'AI is paused' : 'AI is running';
-  $('#ai-sub').textContent = paused ? 'No agent replies anywhere' : 'Agents reply as normal';
+  const b = $('#ai-pause');
+  b.dataset.paused = paused ? '1' : '0';
+  b.textContent = paused ? 'Resume' : 'Pause all';
+  b.className = 'btn btn-s ' + (paused ? 'btn-p' : 'btn-g');
+  b.title = paused ? 'Let agents reply again' : 'Stop every agent on every account from replying';
+  $('#ai-box').classList.toggle('paused', !!paused);
+  $('#ai-state').innerHTML = paused ? '<i class="dot bad"></i>Paused for everyone' : '<i class="dot on"></i>On for everyone';
 }
 
 // ══ ACTIONS ═════════════════════════════════════════════════
 async function toggleAi(on) {
   if (on) {
-    const ok = await ask({ title: 'Pause all AI?', body: 'Every agent on every account stops replying until you turn it back on. Customers get no answer in the meantime.', ok: 'Pause AI', danger: true });
+    const ok = await ask({ title: 'Pause agent replies for everyone?', body: 'Agents on every account stop replying until you resume them. Messages still arrive; they just aren’t answered.', ok: 'Pause replies', danger: true });
     if (!ok) return;
   }
-  try { await post('llm_pause', { on: on }); setAiSwitch(on); toast(on ? 'All AI calls paused' : 'AI calls resumed'); if (S.boot) S.boot.paused = on; load(true); } catch (e) { toast(e.message, true); }
+  try { await post('llm_pause', { on: on }); setAiSwitch(on); toast(on ? 'Agent replies paused' : 'Agent replies resumed'); if (S.boot) S.boot.paused = on; load(true); } catch (e) { toast(e.message, true); }
 }
 async function suspend(id, name) {
   const why = await ask({ title: 'Suspend ' + name + '?', body: 'They’re signed out straight away and can’t sign back in. Their agents stop replying. Nothing is deleted, and you can lift it any time.',
@@ -3737,6 +3796,7 @@ document.addEventListener('click', async (e) => {
     if (k === 'acctype') { S.acc.type = v; S.acc.page = 1; history.replaceState(null, '', '#/accounts' + viewQuery()); load(); }
     else if (k === 'gfilter') { S.guests.filter = v; load(); }
     else if (k === 'mrole') { S.msg.role = v; S.msg.page = 1; load(); }
+    else if (k === 'settab') { S.setTab = v; $$('[data-sec]').forEach((el) => { el.hidden = el.dataset.sec !== v; }); $$('[data-tab="settab"]').forEach((b) => b.setAttribute('aria-selected', b.dataset.val === v ? 'true' : 'false')); }
     else if (k === 'dtab') { S.dtab = v; renderDrawer(); $('.dr-b').scrollTop = 0; }
     return;
   }
@@ -3796,9 +3856,13 @@ document.addEventListener('click', async (e) => {
   if (accEl && !t.closest('a')) { const id = +accEl.dataset.acc; if (id) location.hash = '#/account/' + id; return; }
 });
 $('#scrim').addEventListener('click', closeDrawer);
-$('#ai-pause').addEventListener('click', (e) => { e.stopPropagation(); toggleAi(e.currentTarget.getAttribute('aria-checked') !== 'true'); });
+$('#ai-pause').addEventListener('click', (e) => { e.stopPropagation(); toggleAi(e.currentTarget.dataset.paused !== '1'); });
 $('#live').addEventListener('click', () => { S.live = !S.live; tickLive(); if (S.live) refreshLive(); });
 $('#menu').addEventListener('click', () => $('#side').classList.toggle('on'));
+// Settings: say when there are changes to save.
+const markDirty = (e) => { if (S.view === 'settings' && e.target.closest && e.target.closest('.fsec')) { const el = $('#set-dirty'); if (el) el.hidden = false; } };
+document.addEventListener('input', markDirty);
+document.addEventListener('click', (e) => { if (S.view === 'settings' && e.target.closest('[data-act="bi-toggle"],[data-act="del-row"],[data-act="add-price"],[data-act="add-fx"],[data-act="bi-clear"],[data-act="add-unpriced"]')) { const el = $('#set-dirty'); if (el) el.hidden = false; } }, true);
 document.addEventListener('change', (e) => {
   if (e.target.id === 'bi-prov' && S.set) { $('#bi-model').innerHTML = biModelOptions(S.set.prices, e.target.value, ''); $('#bi-price').textContent = biPriceText(S.set.prices, $('#bi-model').value); }
   if (e.target.id === 'bi-model' && S.set) $('#bi-price').textContent = biPriceText(S.set.prices, e.target.value);

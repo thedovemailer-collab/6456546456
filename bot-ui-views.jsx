@@ -11009,7 +11009,7 @@ const AgentListItem = ({agent, selected, onClick, onToggle}) => {
         <span style={{display:'block',fontSize:10.5,color:'#8a8aa8',marginTop:2,
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}
           title={agent.schedule && agent.schedule.enabled ? 'Reply hours: ' + SCHEDULE_GATE.describe(agent.schedule) : undefined}>
-          <span style={{fontFamily:'var(--mono)',fontSize:10}}>{agent.model}</span>
+          <span style={{fontFamily:'var(--mono)',fontSize:10}}>{modelLabel(agent.model) === 'Built-in AI' ? 'Built-in AI' : agent.model}</span>
           {!agent.active ? ' · Paused' : offHours ? ' · Outside hours' : ''}
         </span>
       </span>
@@ -11792,6 +11792,7 @@ const MODEL_PROVIDER = (id) => {
   return null;
 };
 const ModelIcon = ({id, s=14}) => {
+  if (id === 'builtin' || (typeof llmOnBuiltin === 'function' && llmOnBuiltin())) return <BuiltinAiIcon s={s}/>;
   const p = MODEL_PROVIDER(id);
   const def = LLM_PROVIDERS.find(x => x.id === p);
   if (def) return <def.Icon s={s}/>;
@@ -11830,8 +11831,8 @@ const ModelPicker = ({value, options, onChange, bare = false}) => {
   // Group models by provider for the dropdown — mirrors how the user
   // thinks about the catalogue ("which Gemini model?", "which Claude?").
   const groups = React.useMemo(()=>{
-    const out = { gemini:[], openai:[], claude:[], other:[] };
-    options.forEach(m => { (out[MODEL_PROVIDER(m) || 'other']).push(m); });
+    const out = { builtin:[], gemini:[], openai:[], claude:[], other:[] };
+    options.forEach(m => { (out[m === 'builtin' ? 'builtin' : (MODEL_PROVIDER(m) || 'other')]).push(m); });
     return out;
   }, [options]);
 
@@ -11848,7 +11849,7 @@ const ModelPicker = ({value, options, onChange, bare = false}) => {
           fontFamily:'var(--font)',color:'var(--t1)',fontSize:12.5,
         }}>
         <ModelIcon id={value} s={14}/>
-        <span style={{flex:1,minWidth:0,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontWeight:500,letterSpacing:'-0.005em'}}>{value || 'Choose a model…'}</span>
+        <span style={{flex:1,minWidth:0,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontWeight:500,letterSpacing:'-0.005em'}}>{value === 'builtin' || (typeof llmOnBuiltin === 'function' && llmOnBuiltin()) ? 'Built-in AI' : (value || 'Choose a model…')}</span>
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{color:'var(--t3)',transition:'transform 0.16s',transform:open?'rotate(180deg)':'none',flexShrink:0}}><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       {open && ReactDOM.createPortal(
@@ -11864,6 +11865,7 @@ const ModelPicker = ({value, options, onChange, bare = false}) => {
           boxShadow:'0 16px 48px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.04) inset',
         }}>
           {[
+            {id:'builtin', label:'Built-in'},
             {id:'gemini', label:'Google Gemini'},
             {id:'openai', label:'OpenAI'},
             {id:'claude', label:'Anthropic'},
@@ -11885,7 +11887,7 @@ const ModelPicker = ({value, options, onChange, bare = false}) => {
                     onMouseEnter={e=>{ if(!sel) e.currentTarget.style.background='rgba(255,255,255,0.04)'; }}
                     onMouseLeave={e=>{ if(!sel) e.currentTarget.style.background='transparent'; }}>
                     <ModelIcon id={m} s={14}/>
-                    <span style={{flex:1,fontSize:12,fontWeight:500,color:'var(--t1)',letterSpacing:'-0.005em',fontFamily:'var(--mono)'}}>{m}</span>
+                    <span style={{flex:1,fontSize:12,fontWeight:500,color:'var(--t1)',letterSpacing:'-0.005em',fontFamily:m === 'builtin' ? 'var(--font)' : 'var(--mono)'}}>{m === 'builtin' ? 'Built-in AI' : m}</span>
                     {sel && <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>}
                   </button>
                 );
@@ -13079,6 +13081,7 @@ const AgentsView = ({_embed} = {}) => {
                     // Only providers with a key saved, plus whatever the
                     // agent already uses so it is never blank.
                     const v = agentCreds.values || {};
+                    if (llmOnBuiltin()) return ['builtin'];     // the built-in AI runs every agent
                     const keyed = LLM_PROVIDERS.filter(p => v['llm_' + p.id]).map(p => p.id);
                     if (!agentCreds.loaded || !keyed.length) return MODELS;
                     const list = MODELS.filter(m => keyed.includes(MODEL_PROVIDER(m)));
@@ -15630,10 +15633,17 @@ const LLM_CATALOG = {
   },
   refresh() { return this.load(true); },
 };
-// The built-in AI when it can be chosen: {provider, model, label}, else null.
+// The built-in AI when it can be chosen ({available: true}), else null.
+// The app is never told its provider or model.
 const llmBuiltin = (cat) => {
   const b = cat && cat.builtin;
   return b && b.available ? b : null;
+};
+// Is this account replying with the built-in AI right now?
+const llmOnBuiltin = () => {
+  if (typeof CRED_STORE === 'undefined' || CRED_STORE.get('llm_active') !== 'builtin') return false;
+  const v = LLM_CATALOG.v;
+  return !v || !!llmBuiltin(v);          // until the catalog loads, trust the choice
 };
 // The catalog, kept current (re-renders when it's refreshed).
 const useLlmCatalog = (refresh) => {
@@ -15661,11 +15671,9 @@ const useAvailableModels = (fallbackModels) => {
   // the agent says — so that one model is what there is to choose.
   const bi = active === 'builtin' ? llmBuiltin(cat) : null;
   if (bi) {
-    const pv = LLM_PROVIDERS.find(p => p.id === bi.provider);
-    options.push({value: bi.model, label: `${bi.label || bi.model}  (built-in AI)`, short: bi.label || bi.model,
-      group: 'Built-in AI', provider: bi.provider});
-    const providers = pv ? [{...pv, label: 'Built-in AI', full: 'Built-in AI'}] : [];
-    return {loaded: !!creds.loaded, options, preferred: bi.model, providers, builtin: true};
+    options.push({value: 'builtin', label: 'Built-in AI', short: 'Built-in AI', group: 'Built-in', provider: 'builtin'});
+    const providers = [{id: 'builtin', label: 'Built-in AI', full: 'Built-in AI', Icon: BuiltinAiIcon}];
+    return {loaded: !!creds.loaded, options, preferred: 'builtin', providers, builtin: true};
   }
   keyed.forEach(p => {
     const list = cat && cat.catalog && Array.isArray(cat.catalog[p.id]) && cat.catalog[p.id].length

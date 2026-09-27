@@ -4989,7 +4989,10 @@ const MODEL_LIBRARY = {
   'gemini-2.0-pro':        { label: 'Gemini 2.0',  tier: 'standard' },
   'gemini-1.5-flash':      { label: 'Flash 1.5',   tier: 'fast' },
 };
-const modelLabel = (m) => (MODEL_LIBRARY[m] && MODEL_LIBRARY[m].label) || m || '—';
+// On the built-in AI every agent runs the site's own model, which the app
+// doesn't name: agents simply show "Built-in AI".
+const modelLabel = (m) => (m === 'builtin' || (typeof llmOnBuiltin === 'function' && llmOnBuiltin())) ? 'Built-in AI'
+  : (MODEL_LIBRARY[m] && MODEL_LIBRARY[m].label) || m || '—';
 const modelTier  = (m) => (MODEL_LIBRARY[m] && MODEL_LIBRARY[m].tier)  || 'standard';
 const TIER_GLYPH = { flagship: '✦', standard: '◆', fast: '⚡' };
 const TIER_COLOR = {

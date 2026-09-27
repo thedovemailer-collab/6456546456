@@ -4573,6 +4573,8 @@ function dm_ai_llm(PDO $pdo, int $acc, array $agent): ?array {
 // What the approval notice names: "Gemini 2.5 Flash, by Google".
 function dm_ai_llm_label(?array $llm): array {
     if (!$llm) return ['provider' => '', 'company' => '', 'model' => '', 'ready' => false];
+    // The built-in AI isn't named by provider or model in the app.
+    if (!empty($llm['builtin'])) return ['provider' => 'builtin', 'company' => '', 'model' => 'Built-in AI', 'ready' => true];
     $company = ['gemini' => 'Google', 'openai' => 'OpenAI', 'claude' => 'Anthropic'][$llm['provider']] ?? $llm['provider'];
     $label = $llm['model'];
     foreach (llm_model_catalog()[$llm['provider']] ?? [] as $m) { if ($m['id'] === $llm['model']) { $label = $m['label']; break; } }
@@ -30692,13 +30694,10 @@ function llm_is_builtin_key(string $key): bool {
     $b = llm_builtin();
     return $b !== null && $key !== '' && hash_equals($b['key'], $key);
 }
-// What the app may know about it: on or off, and the model (never the key).
+// What the app may know about it: only whether it can be chosen. Its
+// provider, model and key stay with the site.
 function llm_builtin_public(): array {
-    $b = llm_builtin();
-    if (!$b) return ['available' => false, 'provider' => '', 'model' => '', 'label' => ''];
-    $label = $b['model'];
-    foreach (llm_model_catalog()[$b['provider']] ?? [] as $m) { if ($m['id'] === $b['model']) { $label = $m['label']; break; } }
-    return ['available' => true, 'provider' => $b['provider'], 'model' => $b['model'], 'label' => $label];
+    return ['available' => llm_builtin() !== null];
 }
 // The provider and key an account's AI calls go through:
 // ['provider', 'key', 'model', 'builtin' => bool], or null when it has
@@ -30728,6 +30727,7 @@ function llm_resolve(PDO $pdo, int $acc): ?array {
 // one, else the account's chosen model for that provider.
 function llm_model_for(PDO $pdo, int $acc, string $provider, string $key, string $want = ''): string {
     if (llm_is_builtin_key($key)) return llm_builtin()['model'];
+    if ($want === 'builtin') $want = '';     // an agent saved on the built-in AI, now on the account's own key
     return $want !== '' ? $want : llm_account_model($pdo, $acc, $provider);
 }
 

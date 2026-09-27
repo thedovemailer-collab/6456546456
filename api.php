@@ -5244,6 +5244,19 @@ function dm_worker_key(): string {
     if (BC_DM_CRON_KEY !== '') return BC_DM_CRON_KEY;
     return hash_hmac('sha256', 'bc-dm-worker-v1', 'bc-dm|' . $db_pass . '|' . $db_name);
 }
+// admin.php (beside this file, on the same database) signs its requests
+// with a key made from the database password, so only something that can
+// read that password can act as the administrator. Each signature is good
+// for two minutes.
+function bc_admin_op_key(): string {
+    global $db_pass, $db_name;
+    return hash_hmac('sha256', 'bc-admin-op-v1', 'bc-admin|' . $db_pass . '|' . $db_name);
+}
+function bc_admin_sig_ok(string $raw, string $sig): bool {
+    if (!preg_match('/^(\d{10})\.([a-f0-9]{64})$/', $sig, $m)) return false;
+    if (abs(time() - (int)$m[1]) > 120) return false;
+    return hash_equals(hash_hmac('sha256', $m[1] . '.' . $raw, bc_admin_op_key()), $m[2]);
+}
 function dm_worker_key_ok(string $key): bool {
     if ($key === '') return false;
     if (BC_DM_CRON_KEY !== '' && hash_equals(BC_DM_CRON_KEY, $key)) return true;
@@ -12178,7 +12191,7 @@ function bc_self_urls(): array {
 // Public actions — no session required. Everything else is gated below the
 // switch; an unauthenticated request to a private action returns 401 and the
 // frontend kicks the user to the login screen.
-$PUBLIC_ACTIONS = ['auth_register', 'auth_login', 'auth_whoami', 'auth_logout', 'auth_prelogin', 'auth_guest', 'auth_guest_challenge', 'auth_guest_resume', 'auth_name_check', 'verify_license', 'contact_page', 'dm_ai_cron', 'dm_ai_worker', 'dm_file', 'avatar'];
+$PUBLIC_ACTIONS = ['auth_register', 'auth_login', 'auth_whoami', 'auth_logout', 'auth_prelogin', 'auth_guest', 'auth_guest_challenge', 'auth_guest_resume', 'auth_name_check', 'verify_license', 'contact_page', 'dm_ai_cron', 'dm_ai_worker', 'dm_file', 'avatar', 'admin_op'];
 $BC_ME = null;
 if (!in_array($action, $PUBLIC_ACTIONS, true)) {
     $BC_ME = require_account($pdo);
@@ -19242,6 +19255,92 @@ GHOSTTXT;
             dm_worker_want();
         } catch (Throwable $e) {}
         ok();
+    }
+
+    // ── ADMIN CONSOLE ────────────────────────────────────────
+    // admin.php acts on a seller's invoices through the same code the app
+    // uses, so a payment confirmed there is delivered exactly as one
+    // confirmed in the app. Signed (see bc_admin_sig_ok).
+    case 'admin_op': {
+        $raw = (string)file_get_contents('php://input');
+        if (!bc_admin_sig_ok($raw, (string)($_SERVER['HTTP_X_ADMIN_SIG'] ?? ''))) { http_response_code(403); err('Forbidden'); }
+        $acc = (int)($body['acc'] ?? 0);
+        $op  = (string)($body['op'] ?? '');
+        $id  = mb_substr(trim((string)($body['id'] ?? '')), 0, 80);
+        $chk = $pdo->prepare("SELECT 1 FROM bc_accounts WHERE id=?");
+        $chk->execute([$acc]);
+        if ($acc <= 0 || !$chk->fetchColumn()) err('Account not found');
+        if ($id === '') err('Invoice id required');
+        $GLOBALS['BC_LLM_ACCT'] = $acc;
+        $find = function () use ($pdo, $acc, $id) { foreach (dm_shop_invoices($pdo, $acc) as $r) if (is_array($r) && (string)($r['id'] ?? '') === $id) return $r; return null; };
+        if (!$find()) err('Invoice not found');
+
+        if ($op === 'inv_confirm') {
+            // As "Mark as paid" in the app. The server delivers direct chats,
+            // and bot chats it can send on (a bot token is saved); otherwise
+            // the seller's app delivers it the next time it is open.
+            ignore_user_abort(true);
+            $hit = null;
+            dm_shop_inv_mutate($pdo, $acc, function (array &$list) use ($pdo, $acc, $id, &$hit) {
+                foreach ($list as &$r) if (is_array($r) && (string)($r['id'] ?? '') === $id) {
+                    $st = (string)($r['status'] ?? '');
+                    if ($st === 'pending' || (in_array($st, ['cancelled', 'expired'], true) && empty($r['wiped_at']))) {
+                        $r['status'] = 'confirmed'; $r['confirmed_at'] = time(); $r['manual_confirm'] = true; $r['confirmed_by'] = 'admin';
+                        unset($r['cancelled_at'], $r['cancelled_by'], $r['expired_at']);
+                    }
+                    $bc = bot_conv_parse((string)($r['conv_id'] ?? ''));
+                    if (!shop_srv_inv($r) && $bc && bot_token($pdo, $acc, $bc['platform']) !== '') { $r['srv'] = 1; $r['srv_adopted_at'] = time(); }
+                    $hit = $r; break;
+                }
+                unset($r);
+            });
+            if (!$hit || ($hit['status'] ?? '') !== 'confirmed') err('This invoice can’t be confirmed (it was removed).');
+            if (!empty($hit['delivered'])) ok(['status' => 'confirmed', 'delivery' => 'done']);
+            if (!shop_srv_inv($hit)) ok(['status' => 'confirmed', 'delivery' => 'app']);
+            if ((int)($hit['dm_delivery_attempts'] ?? 0) > 0) {
+                dm_shop_inv_mutate($pdo, $acc, function (array &$list) use ($id, &$hit) {
+                    foreach ($list as &$r) if (is_array($r) && (string)($r['id'] ?? '') === $id && empty($r['delivered'])) { $r['dm_delivery_attempts'] = 0; $hit = $r; break; }
+                    unset($r);
+                });
+            }
+            dm_shop_watch_add($pdo, $acc, $hit, 0);
+            dm_worker_want();
+            dm_shop_long($pdo);
+            @set_time_limit(150);
+            try { dm_shop_fulfil($pdo, $acc, $hit); } catch (Throwable $e) { error_log('[admin_op] delivery: ' . $e->getMessage()); }
+            ok(['status' => 'confirmed', 'delivery' => 'server']);
+        }
+        if ($op === 'inv_cancel' || $op === 'inv_edit') {
+            $d = is_array($body['data'] ?? null) ? $body['data'] : [];
+            $done = false; $why = '';
+            dm_shop_inv_mutate($pdo, $acc, function (array &$list) use ($op, $id, $d, &$done, &$why) {
+                foreach ($list as &$r) if (is_array($r) && (string)($r['id'] ?? '') === $id) {
+                    if ($op === 'inv_cancel') {
+                        if (($r['status'] ?? '') !== 'pending') { $why = 'Only a waiting invoice can be cancelled.'; break; }
+                        $r['status'] = 'cancelled'; $r['cancelled_at'] = time(); $r['cancelled_by'] = 'admin';
+                    } else {
+                        if (array_key_exists('description', $d)) $r['description'] = mb_substr(trim((string)$d['description']), 0, 500);
+                        if (array_key_exists('amount_fiat', $d)) {
+                            $a = trim((string)$d['amount_fiat']);
+                            if (!preg_match('/^\d{1,9}(\.\d{1,2})?$/', $a)) { $why = 'Enter the amount as a number, e.g. 25 or 25.50.'; break; }
+                            $r['amount_fiat'] = $a;
+                        }
+                        if (array_key_exists('fiat', $d)) {
+                            $f = strtoupper(trim((string)$d['fiat']));
+                            if (!preg_match('/^[A-Z]{3,4}$/', $f)) { $why = 'Use a currency code such as USD.'; break; }
+                            $r['fiat'] = $f;
+                        }
+                        $r['edited_by'] = 'admin'; $r['edited_at'] = time();
+                    }
+                    $done = true; break;
+                }
+                unset($r);
+            });
+            if (!$done) err($why ?: 'Invoice not found');
+            ok(['invoice' => $find()]);
+        }
+        if ($op === 'inv_delete') ok(['deleted' => dm_inv_delete($pdo, $acc, [$id])]);
+        err('Unknown operation');
     }
 
     // The background worker (see BACKGROUND WORKER). Public, keyed.

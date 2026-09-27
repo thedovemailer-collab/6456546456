@@ -615,7 +615,8 @@ function a_invoices(?string $from = null, ?int $acc = null): array {
                 'usd' => a_usd($inv['amount_fiat'] ?? '', $inv['fiat'] ?? 'USD'),
                 'desc' => mb_substr((string)($inv['description'] ?? ''), 0, 120),
                 'agent' => (string)($inv['agent_name'] ?? ''), 'origin' => (string)($inv['origin'] ?? ''),
-                'conv_id' => (string)($inv['conv_id'] ?? ''),
+                'conv_id' => (string)($inv['conv_id'] ?? ''), 'customer' => (string)($inv['customer'] ?? ''),
+                'delivered' => !empty($inv['delivered']),
             ];
         }
     }
@@ -1111,7 +1112,7 @@ function api_account(int $id): array {
     unset($prof['vault'], $prof['agent_priv'], $prof['page_theme']);
 
     $agents = a_rows("SELECT id, name, model, active, replies, conv, " . a_c('bc_agents', 'sell_catalog', '1') . " sell_catalog, updated_at FROM bc_agents WHERE account_id=? ORDER BY active DESC, replies DESC LIMIT 50", [$id]);
-    $products = a_rows("SELECT id, name, type, price, " . a_c('bc_products', 'price_currency', "'USD'") . " currency, billing, stock, " . a_c('bc_products', 'enabled_for_ai', '1') . " enabled FROM bc_products WHERE account_id=? ORDER BY id DESC LIMIT 60", [$id]);
+    $products = a_rows("SELECT id, name, type, price, " . a_c('bc_products', 'price_currency', "'USD'") . " currency, billing, stock, " . a_c('bc_products', 'enabled_for_ai', '1') . " enabled FROM bc_products WHERE account_id=? ORDER BY FIELD(type,'pkg','prod','add'), id DESC LIMIT 1000", [$id]);
     $convs = a_rows("SELECT id, name, handle, platform, stage, ai_status, auto_reply, unread, LEFT(last_msg, 140) last_msg, updated_at FROM bc_conversations WHERE account_id=? ORDER BY updated_at DESC LIMIT 60", [$id]);
     $convN = (int)a_val("SELECT COUNT(*) FROM bc_conversations WHERE account_id=?", [$id]);
     $custN = a_has('bc_end_users') ? (int)a_val("SELECT COUNT(*) FROM bc_end_users WHERE account_id=?", [$id]) : 0;
@@ -1169,7 +1170,7 @@ function api_account(int $id): array {
                      'sales' => array_map(fn($v) => round($v, 2), a_fill($r, $sDay, 0.0))],
         'llm' => $llm, 'cred' => $cred, 'bots' => $bots, 'profile' => $prof,
         'agents' => $agents, 'products' => $products, 'convs' => $convs,
-        'sales' => array_slice(array_values($sales), 0, 40), 'invoices' => array_slice($inv, 0, 30), 'invoice_counts' => $invS,
+        'sales' => array_slice(array_values($sales), 0, 40), 'invoices' => array_slice($inv, 0, 500), 'invoice_counts' => $invS,
         'threads' => $threads, 'guests' => $guests, 'cooldowns' => $cool, 'limits' => $limits,
         'note' => $note, 'audit' => $audit,
     ];
@@ -1672,6 +1673,79 @@ function a_delete_account(int $id): array {
 }
 
 // Signs this browser in to the app as the account (a fresh app session).
+// ── Products and invoices of an account ─────────────────────
+const A_PROD_TYPES = ['prod' => 'Product', 'pkg' => 'Package', 'add' => 'Add-on'];
+const A_BILLING = ['one-time', 'monthly', 'yearly', 'custom'];
+function a_product(int $acc, int $pid): array {
+    $p = a_row("SELECT * FROM bc_products WHERE account_id=? AND id=?", [$acc, $pid]);
+    if (!$p) a_fail('That product no longer exists.', 404);
+    $feats = json_decode((string)($p['feats'] ?? ''), true);
+    $inc = json_decode((string)($p['products'] ?? ''), true);
+    $names = [];
+    if (is_array($inc) && $inc) {
+        $ids = array_values(array_filter(array_map(fn($x) => (int)(is_array($x) ? ($x['id'] ?? $x['product_id'] ?? 0) : $x), $inc)));
+        if ($ids) foreach (a_rows("SELECT id, name FROM bc_products WHERE account_id=? AND id IN (" . implode(',', array_fill(0, count($ids), '?')) . ")", array_merge([$acc], $ids)) as $x) $names[] = $x['name'];
+    }
+    $stock = null;
+    if (a_has('bc_product_stock')) $stock = a_row("SELECT SUM(status='available') available, SUM(status<>'available') given FROM bc_product_stock WHERE account_id=? AND product_id=?", [$acc, $pid]);
+    return [
+        'id' => (int)$p['id'], 'type' => (string)$p['type'], 'name' => (string)$p['name'], 'sku' => (string)($p['sku'] ?? ''),
+        'price' => (string)($p['price'] ?? ''), 'currency' => strtoupper((string)($p['price_currency'] ?? '') ?: 'USD'),
+        'billing' => (string)($p['billing'] ?? ''), 'stock' => (string)($p['stock'] ?? ''), 'expiry' => (string)($p['expiry'] ?? ''),
+        'description' => (string)($p['description'] ?? ''), 'post_payment_text' => (string)($p['post_payment_text'] ?? ''),
+        'enabled' => !array_key_exists('enabled_for_ai', $p) || (int)$p['enabled_for_ai'] === 1,
+        'feats' => is_array($feats) ? $feats : [], 'feats_editable' => !is_array($feats) || !array_filter($feats, fn($f) => !is_string($f)),
+        'includes' => $names, 'has' => ['post_payment_text' => array_key_exists('post_payment_text', $p), 'enabled_for_ai' => array_key_exists('enabled_for_ai', $p), 'price_currency' => array_key_exists('price_currency', $p)],
+        'stock_list' => $stock && ($stock['available'] !== null) ? ['available' => (int)$stock['available'], 'given' => (int)$stock['given']] : null,
+        'updated_at' => $p['updated_at'] ?? null,
+    ];
+}
+function a_invoice(int $acc, string $id): array {
+    $list = json_decode((string)a_val("SELECT meta FROM bc_credentials WHERE account_id=? AND `key`='payments_invoices'", [$acc], ''), true);
+    if (is_array($list)) foreach ($list as $inv) if (is_array($inv) && (string)($inv['id'] ?? '') === $id) {
+        $conv = (string)($inv['conv_id'] ?? '');
+        $c = $conv !== '' ? a_row("SELECT name, handle, platform FROM bc_conversations WHERE account_id=? AND id=?", [$acc, $conv]) : [];
+        foreach (['created', 'confirmed_at', 'cancelled_at', 'expired_at', 'delivered_at'] as $k) if (isset($inv[$k]) && (int)$inv[$k] > 20000000000) $inv[$k] = intdiv((int)$inv[$k], 1000);
+        unset($inv['callback']);
+        return ['inv' => $inv, 'conv' => $c ? ['id' => $conv, 'name' => $c['name'], 'handle' => $c['handle'], 'platform' => $c['platform']] : ($conv !== '' ? ['id' => $conv] : null)];
+    }
+    a_fail('That invoice no longer exists.', 404);
+    return [];
+}
+// Invoice actions go through api.php (beside this file), so a payment
+// confirmed here is delivered exactly as one confirmed in the app. The
+// request is signed with a key made from the database password.
+function a_api_op(string $op, int $acc, string $id, array $data = []): array {
+    $cf = a_db_conf();
+    $key = hash_hmac('sha256', 'bc-admin-op-v1', 'bc-admin|' . (string)$cf['pass'] . '|' . (string)$cf['name']);
+    $body = json_encode(['action' => 'admin_op', 'op' => $op, 'acc' => $acc, 'id' => $id, 'data' => $data], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $ts = (string)time();
+    $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $dir = rtrim(str_replace('\\', '/', dirname((string)($_SERVER['SCRIPT_NAME'] ?? '/'))), '/');
+    $url = ($GLOBALS['A_HTTPS'] ? 'https' : 'http') . '://' . $host . $dir . '/' . ADMIN_API_FILE . '?action=admin_op';
+    if (!function_exists('curl_init')) a_fail('cURL isn’t available on this server, so the console can’t reach api.php.');
+    $call = function (bool $local) use ($url, $body, $ts, $key, $host) {
+        $ch = curl_init($url);
+        $o = [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $body, CURLOPT_RETURNTRANSFER => true, CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 160,
+              CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-Admin-Sig: ' . $ts . '.' . hash_hmac('sha256', $ts . '.' . $body, $key)]];
+        // The server can't always reach its own public address: then straight to this machine.
+        if ($local) { $h = parse_url($url, PHP_URL_HOST); $port = parse_url($url, PHP_URL_PORT) ?: ($GLOBALS['A_HTTPS'] ? 443 : 80); $o[CURLOPT_RESOLVE] = [$h . ':' . $port . ':127.0.0.1']; }
+        curl_setopt_array($ch, $o);
+        $raw = curl_exec($ch);
+        $err = $raw === false ? curl_error($ch) : '';
+        $no = curl_errno($ch);
+        curl_close($ch);
+        return [$raw, $err, $no];
+    };
+    [$raw, $err, $no] = $call(false);
+    if ($raw === false && in_array($no, [6, 7, 28, 35, 60], true)) [$raw, $err, $no] = $call(true);
+    if ($raw === false) a_fail('Couldn’t reach api.php: ' . $err);
+    $j = json_decode((string)$raw, true);
+    if (!is_array($j)) a_fail('api.php sent an unexpected answer. Is the new api.php uploaded?');
+    if (!empty($j['error'])) a_fail($j['error'] === 'Unknown operation' || $j['error'] === 'Forbidden' ? 'api.php refused the request. Upload the new api.php.' : (string)$j['error']);
+    return $j;
+}
+
 function a_impersonate(int $id): void {
     session_write_close();
     $sid = bin2hex(random_bytes(20));
@@ -1784,6 +1858,56 @@ function a_action(string $act, array $b): array {
             a_audit('llm_pause', null, $on ? 'Paused agent replies for everyone' : 'Resumed agent replies');
             return ['ok' => true, 'paused' => $on];
         }
+        case 'product_save': {
+            $acc = (int)($b['acc'] ?? 0);
+            $a = a_account_or_fail($acc);
+            $cur = a_product($acc, $id);
+            $f = is_array($b['fields'] ?? null) ? $b['fields'] : [];
+            $name = trim((string)($f['name'] ?? $cur['name']));
+            if ($name === '') a_fail('A product needs a name.');
+            $set = ['name' => mb_substr($name, 0, 200)];
+            if (isset($f['type'])) { if (!isset(A_PROD_TYPES[$f['type']])) a_fail('Unknown type.'); $set['type'] = $f['type']; }
+            if (isset($f['price'])) $set['price'] = mb_substr(trim((string)$f['price']), 0, 40);
+            if (isset($f['currency']) && $cur['has']['price_currency']) { $c = strtoupper(trim((string)$f['currency'])); if (!preg_match('/^[A-Z]{3}$/', $c)) a_fail('Use a 3-letter currency code such as USD.'); $set['price_currency'] = $c; }
+            if (isset($f['billing'])) { if (!in_array($f['billing'], A_BILLING, true)) a_fail('Unknown billing.'); $set['billing'] = $f['billing']; }
+            if (isset($f['stock'])) $set['stock'] = mb_substr(trim((string)$f['stock']), 0, 20);
+            if (isset($f['expiry'])) $set['expiry'] = mb_substr(trim((string)$f['expiry']), 0, 20);
+            if (isset($f['sku'])) $set['sku'] = mb_substr(trim((string)$f['sku']), 0, 80);
+            if (isset($f['description'])) $set['description'] = mb_substr((string)$f['description'], 0, 20000);
+            if (isset($f['post_payment_text']) && $cur['has']['post_payment_text']) $set['post_payment_text'] = mb_substr((string)$f['post_payment_text'], 0, 20000);
+            if (isset($f['enabled']) && $cur['has']['enabled_for_ai']) $set['enabled_for_ai'] = $f['enabled'] ? 1 : 0;
+            if (isset($f['feats']) && is_array($f['feats']) && $cur['feats_editable'])
+                $set['feats'] = json_encode(array_values(array_slice(array_filter(array_map(fn($x) => mb_substr(trim((string)$x), 0, 200), $f['feats']), 'strlen'), 0, 60)), JSON_UNESCAPED_UNICODE);
+            a_exec("UPDATE bc_products SET " . implode(', ', array_map(fn($k) => "`$k`=?", array_keys($set))) . " WHERE account_id=? AND id=?", array_merge(array_values($set), [$acc, $id]));
+            a_audit('product_save', $acc, 'Edited product “' . $set['name'] . '” of ' . ($a['display_name'] ?: $a['username']));
+            return ['ok' => true, 'product' => a_product($acc, $id)];
+        }
+        case 'product_delete': {
+            $acc = (int)($b['acc'] ?? 0);
+            $a = a_account_or_fail($acc);
+            $cur = a_product($acc, $id);
+            a_exec("DELETE FROM bc_products WHERE account_id=? AND id=?", [$acc, $id]);
+            // Unsold stock goes with it; items already given out stay as the record.
+            if (a_has('bc_product_stock')) { try { a_exec("DELETE FROM bc_product_stock WHERE account_id=? AND product_id=? AND status='available'", [$acc, $id]); } catch (Throwable $e) { a_warn($e); } }
+            a_audit('product_delete', $acc, 'Deleted product “' . $cur['name'] . '” of ' . ($a['display_name'] ?: $a['username']));
+            return ['ok' => true];
+        }
+        case 'invoice_op': {
+            $acc = (int)($b['acc'] ?? 0);
+            $a = a_account_or_fail($acc);
+            $inv = (string)($b['inv'] ?? '');
+            $op = (string)($b['op'] ?? '');
+            $map = ['confirm' => 'inv_confirm', 'cancel' => 'inv_cancel', 'edit' => 'inv_edit', 'delete' => 'inv_delete'];
+            if (!isset($map[$op])) a_fail('Unknown action.');
+            a_invoice($acc, $inv);
+            $data = [];
+            if ($op === 'edit') foreach (['description', 'amount_fiat', 'fiat'] as $k) if (array_key_exists($k, (array)($b['data'] ?? []))) $data[$k] = (string)$b['data'][$k];
+            if (function_exists('set_time_limit')) @set_time_limit(180);
+            $r = a_api_op($map[$op], $acc, $inv, $data);
+            $words = ['confirm' => 'Confirmed payment of invoice', 'cancel' => 'Cancelled invoice', 'edit' => 'Edited invoice', 'delete' => 'Deleted invoice'];
+            a_audit('invoice_' . $op, $acc, $words[$op] . ' ' . $inv . ' of ' . ($a['display_name'] ?: $a['username']));
+            return ['ok' => true] + $r;
+        }
         case 'ai_scope': {
             $sc = (string)($b['scope'] ?? '');
             if (!in_array($sc, ['builtin', 'own', 'all'], true)) a_fail('Unknown choice.');
@@ -1870,6 +1994,8 @@ if ($A_VIEW === 'app' && $A_IS_API) {
             case 'audit':        $res = api_audit(); break;
             case 'settings':     $res = api_settings(); break;
             case 'search':       $res = api_search((string)($q['q'] ?? '')); break;
+            case 'product':      $res = ['product' => a_product((int)($q['acc'] ?? 0), (int)($q['id'] ?? 0))]; break;
+            case 'invoice':      $res = a_invoice((int)($q['acc'] ?? 0), (string)($q['id'] ?? '')); break;
             default:             $res = null;
         }
         if ($res === null) a_fail('Unknown view.', 404);
@@ -2583,6 +2709,23 @@ table.t { font-size: 12.5px; }
 .av { color: #e4e6ee; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
 .av.on::after { background: var(--d-ok); }
 .kpi .sp { opacity: .6; }
+
+/* Product / invoice popups */
+.pmeta { font-size: 11.5px; color: var(--t3); margin: -4px 0 12px; }
+.pf { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
+.pf label { display: grid; gap: 5px; min-width: 0; }
+.pf label > span { font-size: 11px; color: var(--t3); font-weight: 500; }
+.pf label > span em { font-style: normal; color: var(--t4); margin-left: 4px; }
+.pf .full { grid-column: 1 / -1; }
+.pf .inp { height: 32px; font-size: 12.5px; }
+.pf textarea.inp { height: auto; min-height: 64px; }
+.pf .pf-sw { display: flex; align-items: center; height: 32px; }
+.pinc { display: flex; flex-wrap: wrap; gap: 5px; }
+.pdel { display: flex; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--ln); }
+.iact { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--ln); }
+.modal .kv dd b { color: var(--t1); }
+tr[data-prod], tr[data-inv] { cursor: pointer; }
+@media (max-width: 600px) { .pf { grid-template-columns: minmax(0, 1fr); } }
 
 @media (max-width: 1280px) { .g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1080px) { .g21, .g12, .g3 { grid-template-columns: minmax(0, 1fr); } .search .inp { width: 180px; } }
@@ -3424,7 +3567,7 @@ V.system = function (d) {
 
 V.audit = function (d) {
   const L = { login: 'Signed in', logout: 'Signed out', suspend: 'Suspended', unsuspend: 'Unsuspended', delete: 'Deleted', impersonate: 'Opened app as', reset_password: 'Password reset', bots_off: 'Bots off',
-    clear_cooldowns: 'Cooldowns cleared', clear_limits: 'Limits reset', host_prefs: 'Contact page', purge_guests: 'Guests removed', llm_pause: 'Agent replies', settings: 'Settings', builtin_llm: 'Built-in AI' };
+    clear_cooldowns: 'Cooldowns cleared', clear_limits: 'Limits reset', host_prefs: 'Contact page', purge_guests: 'Guests removed', llm_pause: 'Agent replies', product_save: 'Product edited', product_delete: 'Product deleted', invoice_confirm: 'Invoice paid', invoice_cancel: 'Invoice cancelled', invoice_edit: 'Invoice edited', invoice_delete: 'Invoice deleted', settings: 'Settings', builtin_llm: 'Built-in AI' };
   if (!d.rows.length) return card('', empty('Nothing yet', 'Actions taken here are listed as you make them.'));
   return card('', '<div class="tw"><table class="t" data-per="20"><thead><tr><th>When</th><th>Action</th><th>Account</th><th>Detail</th><th>From</th></tr></thead><tbody>'
     + d.rows.map((r) => '<tr' + (r.target && r.target.username ? ' data-acc="' + r.target.id + '"' : '') + '><td class="dim" style="white-space:nowrap">' + esc(when(r.created_at)) + '</td><td><span class="chip ' + (/delete|suspend$/.test(r.action) ? 'bad' : r.action === 'impersonate' ? 'warn' : 'info') + '">' + esc(L[r.action] || r.action) + '</span></td>'
@@ -3533,7 +3676,7 @@ function renderDrawer() {
     + (d.cooldowns.length ? '<button class="btn btn-g btn-s" data-act="clear-cool"><svg><use href="#i-refresh"/></svg>Clear spam cooldowns</button>' : '')
     + (d.limits.length ? '<button class="btn btn-g btn-s" data-act="clear-limits"><svg><use href="#i-refresh"/></svg>Reset limits</button>' : '')
     + '<button class="btn btn-d btn-s" data-act="delete" style="margin-left:auto"><svg><use href="#i-trash"/></svg>Delete</button></div>';
-  h += '<div class="dr-tabs">' + tabs('dtab', S.dtab, [['overview', 'Overview'], ['convs', 'Conversations', st.convs], ['sales', 'Sales', st.orders_all], ['ai', 'AI', d.llm.calls ? compact(d.llm.calls) : null],
+  h += '<div class="dr-tabs">' + tabs('dtab', S.dtab, [['overview', 'Overview'], ['convs', 'Conversations', st.convs], ['products', 'Products', d.products.length], ['invoices', 'Invoices', d.invoices.length], ['sales', 'Sales', st.orders_all], ['ai', 'AI', d.llm.calls ? compact(d.llm.calls) : null],
     ['direct', 'Direct chats', d.threads.length], ['safety', 'Safety', d.risk.reasons.length || null], ['notes', 'Notes']]) + '</div>';
   h += '<div class="dr-b">' + (DT[S.dtab] || DT.overview)(d) + '</div>';
   dr.innerHTML = h;
@@ -3565,9 +3708,7 @@ DT.overview = function (d) {
   if (d.agents.length) h += card('Agents', '<div class="tw"><table class="t"><thead><tr><th>Agent</th><th>Model</th><th class="r">Replies</th><th class="r">Chats</th><th>State</th></tr></thead><tbody>'
     + d.agents.map((g) => '<tr><td>' + esc(g.name) + '</td><td class="mono dim">' + esc(g.model === 'builtin' ? 'Built-in AI' : (g.model || 'default')) + '</td><td class="r num">' + n(g.replies) + '</td><td class="r num">' + n(g.conv) + '</td><td>' + (+g.active ? '<span class="chip ok">Active</span>' : '<span class="chip">Off</span>') + '</td></tr>').join('')
     + '</tbody></table></div>', { flush: true });
-  if (d.products.length) h += card('Products', '<div class="tw"><table class="t"><thead><tr><th>Product</th><th>Type</th><th class="r">Price</th><th>Billing</th><th class="r">Stock</th><th>Agents sell it</th></tr></thead><tbody>'
-    + d.products.map((p) => '<tr><td class="clip">' + esc(p.name) + '</td><td class="dim">' + esc(p.type) + '</td><td class="r num">' + esc(p.price) + ' ' + esc(p.currency || '') + '</td><td class="dim">' + esc(p.billing || '—') + '</td><td class="r num">' + esc(p.stock) + '</td><td>' + (+p.enabled ? '<span class="chip ok">Yes</span>' : '<span class="chip">No</span>') + '</td></tr>').join('')
-    + '</tbody></table></div>', { flush: true });
+  if (d.products.length) h += card('Products', '<p class="dim" style="margin:0;font-size:12.5px">' + plural(d.products.length, 'item') + ' in the catalogue. <a href="#" data-act="dtab-go" data-tab-to="products" style="text-decoration:underline">View and edit</a></p>');
   if (d.acc.guest && d.acc.host) h += card('Guest of', whoLink(d.acc.host));
   return h;
 };
@@ -3589,10 +3730,7 @@ DT.sales = function (d) {
     + d.sales.map((r) => '<tr><td class="dim" style="white-space:nowrap">' + esc(when(r.created_at)) + '</td><td>' + esc(r.customer || '—') + '</td><td class="clip">' + esc(r.product || 'Custom order') + '</td><td class="r num">' + esc((r.amount || '') + ' ' + (r.currency || '')) + '</td>'
       + '<td>' + (r.paid ? '<span class="chip ok">Paid</span>' : '<span class="chip">' + esc(r.status) + '</span>') + '</td><td class="mono dim clip" style="max-width:160px">' + esc(r.reference || '') + '</td></tr>').join('')
     + '</tbody></table></div>' : empty('No orders yet'), { flush: true });
-  h += card('Invoices', d.invoices.length ? '<div class="tw"><table class="t"><thead><tr><th>Created</th><th>For</th><th>Coin</th><th class="r">Amount</th><th>Status</th><th>Agent</th></tr></thead><tbody>'
-    + d.invoices.map((i) => '<tr><td class="dim" style="white-space:nowrap">' + esc(i.created ? ago(new Date(i.created * 1000).toISOString().slice(0, 19).replace('T', ' ')) : '—') + '</td><td class="clip">' + esc(i.desc || '—') + '</td><td class="mono">' + esc(i.coin) + '</td>'
-      + '<td class="r num">' + esc(i.amount + ' ' + i.fiat) + '</td><td><span class="chip ' + (i.status === 'confirmed' ? 'ok' : i.status === 'pending' ? 'warn' : '') + '">' + esc(i.status === 'confirmed' ? 'Paid' : i.status) + '</span></td><td class="dim">' + esc(i.agent || '—') + '</td></tr>').join('')
-    + '</tbody></table></div>' : empty('No invoices'), { flush: true });
+  h += card('Invoices', '<p class="dim" style="margin:0;font-size:12.5px">' + n(ic.confirmed) + ' paid · ' + n(ic.pending) + ' waiting. <a href="#" data-act="dtab-go" data-tab-to="invoices" style="text-decoration:underline">View and manage</a></p>');
   return h;
 };
 DT.ai = function (d) {
@@ -3670,6 +3808,138 @@ async function openConversation(acc, conv) {
   ask({ title: (c.name || c.id) + (c.handle ? ' · ' + c.handle : ''), html: body, wide: true, ok: showSeller ? 'Open seller' : false, cancel: 'Close',
         onOpen: (w) => { const ch = $('.chat', w); if (ch) ch.scrollTop = ch.scrollHeight; } })
     .then((v) => { if (v && showSeller) location.hash = '#/account/' + d.owner.id; });
+}
+
+// ── Products and invoices (account popup) ─────────────────────
+const PTYPE = { prod: 'Product', pkg: 'Package', add: 'Add-on' };
+const BILL = { 'one-time': 'One-time', monthly: 'Monthly', yearly: 'Yearly', custom: 'Custom' };
+const INV_ST = { confirmed: ['ok', 'Paid'], pending: ['warn', 'Waiting'], cancelled: ['', 'Cancelled'], expired: ['', 'Expired'] };
+const secT = (x) => { x = +x || 0; if (x > 2e10) x = Math.floor(x / 1000); return x ? new Date(x * 1000).toISOString().slice(0, 19).replace('T', ' ') : ''; };
+const invChip = (st) => { const v = INV_ST[st] || ['', st || '—']; return '<span class="chip ' + v[0] + '">' + esc(v[1]) + '</span>'; };
+DT.products = function (d) {
+  if (!d.products.length) return card('', empty('No products', 'This account hasn’t added anything to its catalogue.'));
+  return card('', '<div class="tw"><table class="t" data-per="12"><thead><tr><th>Name</th><th>Type</th><th class="r">Price</th><th>Billing</th><th class="r">Stock</th><th>Agents sell it</th></tr></thead><tbody>'
+    + d.products.map((p) => '<tr data-prod="' + p.id + '"><td class="clip" style="max-width:320px"><b style="font-weight:500">' + esc(p.name) + '</b></td><td class="dim">' + esc(PTYPE[p.type] || p.type) + '</td>'
+      + '<td class="r num">' + esc(p.price) + ' <span class="dim">' + esc(p.currency || '') + '</span></td><td class="dim">' + esc(BILL[p.billing] || p.billing || '—') + '</td><td class="r num">' + esc(p.stock) + '</td>'
+      + '<td>' + (+p.enabled ? '<span class="chip ok">Yes</span>' : '<span class="chip">No</span>') + '</td></tr>').join('')
+    + '</tbody></table></div>', { flush: true, hint: 'select one to view or edit' });
+};
+DT.invoices = function (d) {
+  const ic = d.invoice_counts;
+  if (!d.invoices.length) return card('', empty('No invoices', 'This account hasn’t sent any payment requests.'));
+  return '<div class="grid g4">' + kpi({ label: 'Paid', value: n(ic.confirmed) }) + kpi({ label: 'Waiting', value: n(ic.pending) }) + kpi({ label: 'Cancelled', value: n(ic.cancelled) }) + kpi({ label: 'Expired', value: n(ic.expired) }) + '</div>'
+    + card('', '<div class="tw"><table class="t" data-per="12"><thead><tr><th>Created</th><th>Customer</th><th>For</th><th class="r">Amount</th><th>Coin</th><th>Status</th></tr></thead><tbody>'
+    + d.invoices.map((i) => '<tr data-inv="' + esc(i.id) + '"><td class="dim" style="white-space:nowrap">' + esc(i.created ? when(secT(i.created)) : '—') + '</td><td class="clip" style="max-width:160px">' + esc(i.customer || '—') + '</td>'
+      + '<td class="clip" style="max-width:260px">' + esc(i.desc || '—') + '</td><td class="r num">' + esc(i.amount + ' ' + i.fiat) + '</td><td class="mono dim">' + esc(i.coin) + '</td>'
+      + '<td>' + invChip(i.status) + (i.status === 'confirmed' && !i.delivered ? ' <span class="dim" style="font-size:11px">not delivered</span>' : '') + '</td></tr>').join('')
+    + '</tbody></table></div>', { flush: true, hint: 'select one to view, confirm or change it' });
+};
+function refreshDrawer() { if (S.drawer) openAccount(S.drawer.id, true); }
+
+async function openProduct(acc, id) {
+  let p;
+  try { p = (await api('product', { acc: acc, id: id })).product; } catch (e) { return toast(e.message, true); }
+  const opt = (map, cur) => Object.entries(map).map((x) => '<option value="' + esc(x[0]) + '"' + (x[0] === cur ? ' selected' : '') + '>' + esc(x[1]) + '</option>').join('')
+    + (cur && !map[cur] ? '<option value="' + esc(cur) + '" selected>' + esc(cur) + '</option>' : '');
+  const f = (label, ctl, full) => '<label class="' + (full ? 'full' : '') + '"><span>' + label + '</span>' + ctl + '</label>';
+  const html = '<div class="pmeta">#' + p.id + ' · ' + esc(PTYPE[p.type] || p.type) + (p.updated_at ? ' · updated ' + esc(ago(p.updated_at)) : '')
+      + (p.stock_list ? ' · stock list: ' + n(p.stock_list.available) + ' left, ' + n(p.stock_list.given) + ' given out' : '') + '</div>'
+    + '<div class="pf">'
+    + f('Name', '<input class="inp" id="pf-name" value="' + esc(p.name) + '" maxlength="200">', true)
+    + f('Type', '<select class="inp" id="pf-type">' + opt(PTYPE, p.type) + '</select>')
+    + f('SKU', '<input class="inp mono" id="pf-sku" value="' + esc(p.sku) + '" maxlength="80">')
+    + f('Price', '<input class="inp" id="pf-price" value="' + esc(p.price) + '" maxlength="40">')
+    + (p.has.price_currency ? f('Currency', '<input class="inp mono" id="pf-cur" value="' + esc(p.currency) + '" maxlength="3" style="text-transform:uppercase">') : '')
+    + f('Billing', '<select class="inp" id="pf-bill">' + opt(BILL, p.billing) + '</select>')
+    + f('Stock', '<input class="inp" id="pf-stock" value="' + esc(p.stock) + '" maxlength="20" placeholder="∞">')
+    + f('Expiry', '<input class="inp" id="pf-exp" value="' + esc(p.expiry) + '" maxlength="20" placeholder="e.g. 30d">')
+    + (p.has.enabled_for_ai ? f('Agents can sell it', '<span class="pf-sw"><button class="sw" role="switch" type="button" id="pf-on" aria-checked="' + (p.enabled ? 'true' : 'false') + '"></button></span>') : '')
+    + f('Description', '<textarea class="inp" id="pf-desc" rows="4">' + esc(p.description) + '</textarea>', true)
+    + (p.feats_editable ? f('Features <em>one per line</em>', '<textarea class="inp" id="pf-feats" rows="3">' + esc(p.feats.join('\n')) + '</textarea>', true) : '')
+    + (p.has.post_payment_text ? f('Sent after payment', '<textarea class="inp" id="pf-post" rows="3" placeholder="Instructions, links or credentials sent once they’ve paid">' + esc(p.post_payment_text) + '</textarea>', true) : '')
+    + (p.includes.length ? f('Included in this package', '<div class="pinc">' + p.includes.map((x) => '<span class="chip">' + esc(x) + '</span>').join(' ') + '</div>', true) : '')
+    + '</div><div class="pdel"><button class="btn btn-d btn-s" type="button" data-pdel>Delete product</button></div>';
+  let w = null;
+  const v = await ask({ title: p.name, html: html, wide: true, ok: 'Save changes', cancel: 'Close',
+    onOpen: (el, done) => {
+      w = el;
+      $('#pf-on', el) && $('#pf-on', el).addEventListener('click', (e) => { const b = e.currentTarget; b.setAttribute('aria-checked', b.getAttribute('aria-checked') === 'true' ? 'false' : 'true'); });
+      $('[data-pdel]', el).addEventListener('click', () => done('delete'));
+    } });
+  if (v === 'delete') {
+    if (!await ask({ title: 'Delete “' + p.name + '”?', body: 'It’s removed from the catalogue, so agents stop offering it. Past orders and licences keep their record. Unsold items in its stock list are removed too.', ok: 'Delete', danger: true })) return;
+    try { await post('product_delete', { acc: acc, id: p.id }); toast('Product deleted'); refreshDrawer(); } catch (e) { toast(e.message, true); }
+    return;
+  }
+  if (!v || !w) return;
+  const val = (sel) => { const el = $(sel, w); return el ? el.value : undefined; };
+  const fields = { name: val('#pf-name'), type: val('#pf-type'), sku: val('#pf-sku'), price: val('#pf-price'), billing: val('#pf-bill'), stock: val('#pf-stock'), expiry: val('#pf-exp'), description: val('#pf-desc') };
+  if ($('#pf-cur', w)) fields.currency = val('#pf-cur').toUpperCase();
+  if ($('#pf-on', w)) fields.enabled = $('#pf-on', w).getAttribute('aria-checked') === 'true';
+  if ($('#pf-feats', w)) fields.feats = val('#pf-feats').split('\n').map((x) => x.trim()).filter(Boolean);
+  if ($('#pf-post', w)) fields.post_payment_text = val('#pf-post');
+  try { await post('product_save', { acc: acc, id: p.id, fields: fields }); toast('Product saved'); refreshDrawer(); } catch (e) { toast(e.message, true); openProduct(acc, id); }
+}
+
+async function openInvoice(acc, id) {
+  let d;
+  try { d = await api('invoice', { acc: acc, id: id }); } catch (e) { return toast(e.message, true); }
+  const i = d.inv, st = String(i.status || 'pending').replace(/^(paid|completed|complete)$/, 'confirmed');
+  const coinAmt = i.amount_coin || i.amount_coin_quoted;
+  const items = Array.isArray(i.items) && i.items.length ? i.items.map((x) => esc((x.qty > 1 ? x.qty + ' × ' : '') + (x.name || 'item'))).join('<br>') : '';
+  const row = (k, v) => v === '' || v == null ? '' : '<dt>' + k + '</dt><dd>' + v + '</dd>';
+  const who = [i.customer, i.customer_handle].filter(Boolean).join(' · ') || (d.conv && d.conv.name) || '';
+  const html = '<dl class="kv">'
+    + row('Status', invChip(st) + (st === 'confirmed' ? (i.delivered ? ' <span class="dim">· delivered</span>' : ' <span class="dim">· not delivered yet</span>') : '') + (i.manual_confirm ? ' <span class="dim">· marked paid by hand</span>' : ''))
+    + row('Amount', '<b style="font-weight:600">' + esc((i.amount_fiat || '') + ' ' + (i.fiat || '')) + '</b>' + (coinAmt ? ' <span class="dim">· ' + esc(coinAmt + ' ' + String(i.coin || '').toUpperCase()) + '</span>' : ''))
+    + row('For', esc(i.description || ''))
+    + row('Items', items)
+    + row('Customer', who ? esc(who) + (d.conv && d.conv.id ? ' <a href="#" data-iconv style="text-decoration:underline;margin-left:6px">Open chat</a>' : '') : '')
+    + row('Channel', i.platform ? esc(i.platform.replace(/^./, (c) => c.toUpperCase())) : '')
+    + row('Agent', esc(i.agent_name || ''))
+    + row('Pay to', i.address ? '<span class="mono" style="font-size:11.5px">' + esc(i.address) + '</span>' : '')
+    + row('Created', i.created ? esc(when(secT(i.created))) : '')
+    + row('Paid', i.confirmed_at ? esc(when(secT(i.confirmed_at))) : '')
+    + row('Cancelled', i.cancelled_at ? esc(when(secT(i.cancelled_at))) + (i.cancelled_by ? ' <span class="dim">· by ' + esc(i.cancelled_by) + '</span>' : '') : '')
+    + row('Reference', '<span class="mono dim">' + esc(i.id) + '</span>')
+    + '</dl><div class="iact">'
+    + (st !== 'confirmed' && !i.wiped_at ? '<button class="btn btn-p btn-s" type="button" data-ia="confirm">Mark as paid</button>' : '')
+    + (st === 'confirmed' && !i.delivered ? '<button class="btn btn-g btn-s" type="button" data-ia="confirm">Deliver again</button>' : '')
+    + (st === 'pending' ? '<button class="btn btn-g btn-s" type="button" data-ia="edit">Edit</button><button class="btn btn-g btn-s" type="button" data-ia="cancel">Cancel invoice</button>' : '')
+    + '<button class="btn btn-d btn-s" type="button" data-ia="delete" style="margin-left:auto">Delete</button></div>';
+  const v = await ask({ title: 'Invoice' + (i.description ? ' · ' + i.description : ''), html: html, wide: true, ok: false, cancel: 'Close',
+    onOpen: (el, done) => {
+      $$('[data-ia]', el).forEach((b) => b.addEventListener('click', () => done(b.dataset.ia)));
+      const oc = $('[data-iconv]', el); if (oc) oc.addEventListener('click', (e) => { e.preventDefault(); done('chat'); });
+    } });
+  if (!v) return;
+  if (v === 'chat') return openConversation(acc, d.conv.id);
+  const run = async (op, data, okMsg) => {
+    try {
+      const r = await post('invoice_op', { acc: acc, inv: i.id, op: op, data: data || {} });
+      toast(op === 'confirm' ? (r.delivery === 'server' ? 'Marked as paid · delivering now' : r.delivery === 'app' ? 'Marked as paid · the seller’s app delivers it when it’s next open' : 'Marked as paid') : okMsg);
+      refreshDrawer();
+      if (op !== 'delete') openInvoice(acc, id);
+    } catch (e) { toast(e.message, true); }
+  };
+  if (v === 'confirm') {
+    if (!await ask({ title: st === 'confirmed' ? 'Deliver this order again?' : 'Mark this invoice as paid?', ok: st === 'confirmed' ? 'Deliver' : 'Mark as paid',
+      body: 'The customer gets the thank-you and what they bought, exactly as if the payment had arrived. Only do this if you’re sure they paid.' })) return;
+    return run('confirm');
+  }
+  if (v === 'cancel') { if (!await ask({ title: 'Cancel this invoice?', body: 'The customer can no longer pay it. You can still mark it as paid later if money arrives.', ok: 'Cancel invoice', cancel: 'Keep it', danger: true })) return; return run('cancel', null, 'Invoice cancelled'); }
+  if (v === 'delete') { if (!await ask({ title: 'Delete this invoice?', body: 'It’s removed from the seller’s payments list for good. Sales already recorded from it stay.', ok: 'Delete', danger: true })) return; return run('delete', null, 'Invoice deleted'); }
+  if (v === 'edit') {
+    let w = null;
+    const ok = await ask({ title: 'Edit invoice', wide: false, ok: 'Save', html: '<div class="pf">'
+        + '<label class="full"><span>For</span><input class="inp" id="ie-desc" value="' + esc(i.description || '') + '" maxlength="500"></label>'
+        + '<label><span>Amount</span><input class="inp" id="ie-amt" value="' + esc(i.amount_fiat || '') + '" inputmode="decimal"></label>'
+        + '<label><span>Currency</span><input class="inp mono" id="ie-fiat" value="' + esc(i.fiat || 'USD') + '" maxlength="4" style="text-transform:uppercase"></label>'
+        + '</div><p class="dim" style="font-size:12px;margin:10px 0 0">The customer was already given ' + (coinAmt ? esc(coinAmt + ' ' + String(i.coin || '').toUpperCase()) : 'an amount') + ' to pay; changing the price here doesn’t change that.</p>',
+      onOpen: (el) => { w = el; } });
+    if (!ok || !w) return openInvoice(acc, id);
+    return run('edit', { description: $('#ie-desc', w).value, amount_fiat: $('#ie-amt', w).value.trim(), fiat: $('#ie-fiat', w).value.trim().toUpperCase() }, 'Invoice updated');
+  }
 }
 
 // ══ ROUTING, LOADING, LIVE ══════════════════════════════════
@@ -3909,6 +4179,7 @@ document.addEventListener('click', async (e) => {
     const a = act.dataset.act;
     e.preventDefault(); e.stopPropagation();
     if (a === 'close-drawer') return closeDrawer();
+    if (a === 'dtab-go') { S.dtab = act.dataset.tabTo; renderDrawer(); $('.dr-b').scrollTop = 0; return; }
     if (a === 'resume-ai') return toggleAi(false);
     if (a === 'toggle-ai') return toggleAi(act.getAttribute('aria-checked') !== 'true');
     if (a === 'suspend') return suspend(+act.dataset.id, act.dataset.name);
@@ -3943,6 +4214,10 @@ document.addEventListener('click', async (e) => {
     }
     return;
   }
+  const prodRow = t.closest('tr[data-prod]');
+  if (prodRow && S.drawer) { openProduct(S.drawer.id, +prodRow.dataset.prod); return; }
+  const invRow = t.closest('tr[data-inv]');
+  if (invRow && S.drawer) { openInvoice(S.drawer.id, invRow.dataset.inv); return; }
   const open = t.closest('[data-open]');
   if (open) { openConversation(+open.dataset.oacc, open.dataset.open); return; }
   if (t.closest('[data-stop]')) return;

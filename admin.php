@@ -2642,6 +2642,7 @@ table.t { font-size: 12.5px; }
 .inp { background: rgba(255,255,255,.03); border-color: rgba(255,255,255,.09); }
 .inp:hover { border-color: rgba(255,255,255,.14); }
 .inp:focus { border-color: rgba(255,255,255,.26); box-shadow: 0 0 0 3px rgba(255,255,255,.05); }
+.inp:focus-visible { outline: none; }
 
 /* Switches: small, neutral, the accent when on */
 .sw { width: 28px; height: 16px; background: rgba(255,255,255,.09); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); transition: background-color .18s; }
@@ -2710,22 +2711,41 @@ table.t { font-size: 12.5px; }
 .av.on::after { background: var(--d-ok); }
 .kpi .sp { opacity: .6; }
 
-/* Product / invoice popups */
-.pmeta { font-size: 11.5px; color: var(--t3); margin: -4px 0 12px; }
-.pf { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
-.pf label { display: grid; gap: 5px; min-width: 0; }
-.pf label > span { font-size: 11px; color: var(--t3); font-weight: 500; }
-.pf label > span em { font-style: normal; color: var(--t4); margin-left: 4px; }
-.pf .full { grid-column: 1 / -1; }
-.pf .inp { height: 32px; font-size: 12.5px; }
-.pf textarea.inp { height: auto; min-height: 64px; }
-.pf .pf-sw { display: flex; align-items: center; height: 32px; }
-.pinc { display: flex; flex-wrap: wrap; gap: 5px; }
-.pdel { display: flex; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--ln); }
-.iact { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--ln); }
-.modal .kv dd b { color: var(--t1); }
+/* Record popups (products, invoices): header, scrolling body, footer */
+.sheet { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; background: #0a111c;
+  border: 1px solid var(--ln2); border-radius: 12px; box-shadow: 0 40px 90px -30px rgba(0,0,0,.95); animation: pop .22s cubic-bezier(.16,1,.3,1); overflow: hidden; }
+.sheet.narrow { width: min(500px, calc(100vw - 32px)); }
+.sh-h { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px 14px; border-bottom: 1px solid var(--ln); }
+.sh-t { min-width: 0; }
+.sh-h h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-sub { font-size: 11.5px; color: var(--t3); margin-top: 3px; }
+.sh-h > .btn { margin-left: auto; flex: none; }
+.sh-b { flex: 1; overflow-y: auto; padding: 4px 20px 14px; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.14) transparent; }
+.sh-f { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--ln); background: rgba(255,255,255,.015); }
+.sh-f > div { display: flex; gap: 8px; }
+.ssec { padding: 14px 0 6px; }
+.ssec + .ssec { border-top: 1px solid var(--ln); }
+.ssec > h4 { margin: 0 0 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--t3); }
+.srow { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 16px; align-items: center; padding: 6px 0; }
+.srow.stack { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.srow.stack .sl { display: flex; align-items: baseline; gap: 8px; }
+.sl b { display: block; font-size: 12.5px; font-weight: 500; color: var(--t2); }
+.sl span { display: block; font-size: 11px; color: var(--t3); margin-top: 1px; line-height: 1.4; }
+.srow.stack .sl span { margin-top: 0; }
+.sc { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sc .inp { width: 100%; height: 32px; font-size: 12.5px; }
+.sc textarea.inp { height: auto; min-height: 76px; padding: 8px 11px; line-height: 1.5; resize: vertical; }
+.sc .inp.cur { width: 80px; flex: none; text-transform: uppercase; font-family: var(--mono); font-size: 12px; }
+.sc .sv { flex: 1; min-width: 0; font-size: 12.5px; color: var(--t1); overflow-wrap: anywhere; }
+.sc .sv.addr { font-size: 11.5px; color: var(--t2); }
+.sc > .btn { flex: none; }
+.pinc { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 4px; }
+.ssum { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 14px 0 2px; padding: 14px 16px; border: 1px solid var(--ln); border-radius: 10px; background: rgba(255,255,255,.02); }
+.ssum .amt { font-size: 22px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.ssum .sub { display: block; font-size: 12px; color: var(--t3); margin-top: 2px; }
+.ssum .sst { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 tr[data-prod], tr[data-inv] { cursor: pointer; }
-@media (max-width: 600px) { .pf { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 600px) { .srow { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
 
 @media (max-width: 1280px) { .g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1080px) { .g21, .g12, .g3 { grid-template-columns: minmax(0, 1fr); } .search .inp { width: 180px; } }
@@ -3836,43 +3856,70 @@ DT.invoices = function (d) {
 };
 function refreshDrawer() { if (S.drawer) openAccount(S.drawer.id, true); }
 
+// A larger popup for records: header, scrolling body, footer with the
+// actions (left: destructive, right: the rest). Resolves { action, el } or null.
+function sheet(o) {
+  return new Promise((resolve) => {
+    S.modal = true;
+    const w = document.createElement('div');
+    w.className = 'modal-w';
+    const btn = (b) => '<button type="button" class="btn btn-' + (b.kind || 'g') + '" data-sb="' + esc(b.id) + '">' + esc(b.label) + '</button>';
+    const bs = o.buttons || [];
+    w.innerHTML = '<div class="sheet' + (o.narrow ? ' narrow' : '') + '" role="dialog" aria-modal="true">'
+      + '<div class="sh-h"><div class="sh-t"><h3>' + esc(o.title) + '</h3>' + (o.sub ? '<div class="sh-sub">' + o.sub + '</div>' : '') + '</div>'
+      + '<button type="button" class="btn btn-g btn-s btn-i" data-sb="__x" aria-label="Close"><svg><use href="#i-x"/></svg></button></div>'
+      + '<div class="sh-b">' + o.html + '</div>'
+      + '<div class="sh-f"><div>' + bs.filter((b) => b.side === 'left').map(btn).join('') + '</div><div>' + bs.filter((b) => b.side !== 'left').map(btn).join('') + '</div></div></div>';
+    document.body.appendChild(w);
+    const done = (v) => { S.modal = false; document.removeEventListener('keydown', key, true); w.remove(); resolve(v); };
+    const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } };
+    document.addEventListener('keydown', key, true);
+    w.addEventListener('click', (e) => {
+      if (e.target === w) return done(null);
+      const b = e.target.closest('[data-sb]');
+      if (b) done(b.dataset.sb === '__x' || b.dataset.sb === 'close' ? null : { action: b.dataset.sb, el: w });
+    });
+    if (o.onOpen) o.onOpen(w, done);
+    const first = $('.sh-b input, .sh-b select, .sh-b textarea', w);
+    if (first && o.focus) setTimeout(() => first.focus(), 30);
+  });
+}
+// Sheet building blocks: a titled section, and a row (label + hint | control).
+const ssec = (title, body) => '<section class="ssec">' + (title ? '<h4>' + esc(title) + '</h4>' : '') + body + '</section>';
+const srow = (label, ctl, hint, stack) => '<div class="srow' + (stack ? ' stack' : '') + '"><div class="sl"><b>' + label + '</b>' + (hint ? '<span>' + hint + '</span>' : '') + '</div><div class="sc">' + ctl + '</div></div>';
+
 async function openProduct(acc, id) {
   let p;
   try { p = (await api('product', { acc: acc, id: id })).product; } catch (e) { return toast(e.message, true); }
   const opt = (map, cur) => Object.entries(map).map((x) => '<option value="' + esc(x[0]) + '"' + (x[0] === cur ? ' selected' : '') + '>' + esc(x[1]) + '</option>').join('')
     + (cur && !map[cur] ? '<option value="' + esc(cur) + '" selected>' + esc(cur) + '</option>' : '');
-  const f = (label, ctl, full) => '<label class="' + (full ? 'full' : '') + '"><span>' + label + '</span>' + ctl + '</label>';
-  const html = '<div class="pmeta">#' + p.id + ' · ' + esc(PTYPE[p.type] || p.type) + (p.updated_at ? ' · updated ' + esc(ago(p.updated_at)) : '')
-      + (p.stock_list ? ' · stock list: ' + n(p.stock_list.available) + ' left, ' + n(p.stock_list.given) + ' given out' : '') + '</div>'
-    + '<div class="pf">'
-    + f('Name', '<input class="inp" id="pf-name" value="' + esc(p.name) + '" maxlength="200">', true)
-    + f('Type', '<select class="inp" id="pf-type">' + opt(PTYPE, p.type) + '</select>')
-    + f('SKU', '<input class="inp mono" id="pf-sku" value="' + esc(p.sku) + '" maxlength="80">')
-    + f('Price', '<input class="inp" id="pf-price" value="' + esc(p.price) + '" maxlength="40">')
-    + (p.has.price_currency ? f('Currency', '<input class="inp mono" id="pf-cur" value="' + esc(p.currency) + '" maxlength="3" style="text-transform:uppercase">') : '')
-    + f('Billing', '<select class="inp" id="pf-bill">' + opt(BILL, p.billing) + '</select>')
-    + f('Stock', '<input class="inp" id="pf-stock" value="' + esc(p.stock) + '" maxlength="20" placeholder="∞">')
-    + f('Expiry', '<input class="inp" id="pf-exp" value="' + esc(p.expiry) + '" maxlength="20" placeholder="e.g. 30d">')
-    + (p.has.enabled_for_ai ? f('Agents can sell it', '<span class="pf-sw"><button class="sw" role="switch" type="button" id="pf-on" aria-checked="' + (p.enabled ? 'true' : 'false') + '"></button></span>') : '')
-    + f('Description', '<textarea class="inp" id="pf-desc" rows="4">' + esc(p.description) + '</textarea>', true)
-    + (p.feats_editable ? f('Features <em>one per line</em>', '<textarea class="inp" id="pf-feats" rows="3">' + esc(p.feats.join('\n')) + '</textarea>', true) : '')
-    + (p.has.post_payment_text ? f('Sent after payment', '<textarea class="inp" id="pf-post" rows="3" placeholder="Instructions, links or credentials sent once they’ve paid">' + esc(p.post_payment_text) + '</textarea>', true) : '')
-    + (p.includes.length ? f('Included in this package', '<div class="pinc">' + p.includes.map((x) => '<span class="chip">' + esc(x) + '</span>').join(' ') + '</div>', true) : '')
-    + '</div><div class="pdel"><button class="btn btn-d btn-s" type="button" data-pdel>Delete product</button></div>';
-  let w = null;
-  const v = await ask({ title: p.name, html: html, wide: true, ok: 'Save changes', cancel: 'Close',
-    onOpen: (el, done) => {
-      w = el;
-      $('#pf-on', el) && $('#pf-on', el).addEventListener('click', (e) => { const b = e.currentTarget; b.setAttribute('aria-checked', b.getAttribute('aria-checked') === 'true' ? 'false' : 'true'); });
-      $('[data-pdel]', el).addEventListener('click', () => done('delete'));
-    } });
-  if (v === 'delete') {
-    if (!await ask({ title: 'Delete “' + p.name + '”?', body: 'It’s removed from the catalogue, so agents stop offering it. Past orders and licences keep their record. Unsold items in its stock list are removed too.', ok: 'Delete', danger: true })) return;
+  const inp = (idn, v, extra) => '<input class="inp" id="' + idn + '" value="' + esc(v) + '"' + (extra || '') + '>';
+  const html = ssec('Details',
+        srow('Name', inp('pf-name', p.name, ' maxlength="200"'))
+      + srow('Type', '<select class="inp" id="pf-type">' + opt(PTYPE, p.type) + '</select>')
+      + srow('SKU', inp('pf-sku', p.sku, ' maxlength="80" placeholder="Optional"'), 'Your own reference'))
+    + ssec('Pricing',
+        srow('Price', inp('pf-price', p.price, ' maxlength="40" inputmode="decimal"') + (p.has.price_currency ? '<input class="inp cur" id="pf-cur" value="' + esc(p.currency) + '" maxlength="3" aria-label="Currency">' : ''))
+      + srow('Billing', '<select class="inp" id="pf-bill">' + opt(BILL, p.billing) + '</select>')
+      + srow('Expiry', inp('pf-exp', p.expiry, ' maxlength="20" placeholder="e.g. 30d"'), 'How long a purchase lasts'))
+    + ssec('Availability',
+        srow('Stock', inp('pf-stock', p.stock, ' maxlength="20" placeholder="∞"'), p.stock_list ? n(p.stock_list.available) + ' items left in its stock list · ' + n(p.stock_list.given) + ' given out' : '∞ means unlimited')
+      + (p.has.enabled_for_ai ? srow('Agents offer it', '<button class="sw" role="switch" type="button" id="pf-on" aria-checked="' + (p.enabled ? 'true' : 'false') + '" aria-label="Agents offer it"></button>', 'Shown to customers in chats') : ''))
+    + ssec('Content',
+        srow('Description', '<textarea class="inp" id="pf-desc" rows="4">' + esc(p.description) + '</textarea>', '', true)
+      + (p.feats_editable ? srow('Features', '<textarea class="inp" id="pf-feats" rows="3" placeholder="One per line">' + esc(p.feats.join('\n')) + '</textarea>', 'One per line', true) : '')
+      + (p.has.post_payment_text ? srow('Sent after payment', '<textarea class="inp" id="pf-post" rows="3" placeholder="Instructions, links or login details">' + esc(p.post_payment_text) + '</textarea>', 'Sent to the customer once they’ve paid', true) : ''))
+    + (p.includes.length ? ssec('Package contents', '<div class="pinc">' + p.includes.map((x) => '<span class="chip">' + esc(x) + '</span>').join('') + '</div>') : '');
+  const r = await sheet({ title: p.name, sub: esc(PTYPE[p.type] || p.type) + ' · #' + p.id + (p.updated_at ? ' · updated ' + esc(ago(p.updated_at)) : ''), html: html,
+    buttons: [{ id: 'delete', label: 'Delete product', kind: 'd', side: 'left' }, { id: 'close', label: 'Cancel' }, { id: 'save', label: 'Save changes', kind: 'p' }],
+    onOpen: (el) => { const sw = $('#pf-on', el); if (sw) sw.addEventListener('click', () => sw.setAttribute('aria-checked', sw.getAttribute('aria-checked') === 'true' ? 'false' : 'true')); } });
+  if (!r) return;
+  if (r.action === 'delete') {
+    if (!await ask({ title: 'Delete “' + p.name + '”?', body: 'Agents stop offering it. Past orders and licences keep their record; unsold stock-list items are removed.', ok: 'Delete', danger: true })) return openProduct(acc, id);
     try { await post('product_delete', { acc: acc, id: p.id }); toast('Product deleted'); refreshDrawer(); } catch (e) { toast(e.message, true); }
     return;
   }
-  if (!v || !w) return;
-  const val = (sel) => { const el = $(sel, w); return el ? el.value : undefined; };
+  const w = r.el, val = (sel) => { const el = $(sel, w); return el ? el.value : undefined; };
   const fields = { name: val('#pf-name'), type: val('#pf-type'), sku: val('#pf-sku'), price: val('#pf-price'), billing: val('#pf-bill'), stock: val('#pf-stock'), expiry: val('#pf-exp'), description: val('#pf-desc') };
   if ($('#pf-cur', w)) fields.currency = val('#pf-cur').toUpperCase();
   if ($('#pf-on', w)) fields.enabled = $('#pf-on', w).getAttribute('aria-checked') === 'true';
@@ -3885,60 +3932,64 @@ async function openInvoice(acc, id) {
   let d;
   try { d = await api('invoice', { acc: acc, id: id }); } catch (e) { return toast(e.message, true); }
   const i = d.inv, st = String(i.status || 'pending').replace(/^(paid|completed|complete)$/, 'confirmed');
-  const coinAmt = i.amount_coin || i.amount_coin_quoted;
-  const items = Array.isArray(i.items) && i.items.length ? i.items.map((x) => esc((x.qty > 1 ? x.qty + ' × ' : '') + (x.name || 'item'))).join('<br>') : '';
-  const row = (k, v) => v === '' || v == null ? '' : '<dt>' + k + '</dt><dd>' + v + '</dd>';
-  const who = [i.customer, i.customer_handle].filter(Boolean).join(' · ') || (d.conv && d.conv.name) || '';
-  const html = '<dl class="kv">'
-    + row('Status', invChip(st) + (st === 'confirmed' ? (i.delivered ? ' <span class="dim">· delivered</span>' : ' <span class="dim">· not delivered yet</span>') : '') + (i.manual_confirm ? ' <span class="dim">· marked paid by hand</span>' : ''))
-    + row('Amount', '<b style="font-weight:600">' + esc((i.amount_fiat || '') + ' ' + (i.fiat || '')) + '</b>' + (coinAmt ? ' <span class="dim">· ' + esc(coinAmt + ' ' + String(i.coin || '').toUpperCase()) + '</span>' : ''))
-    + row('For', esc(i.description || ''))
-    + row('Items', items)
-    + row('Customer', who ? esc(who) + (d.conv && d.conv.id ? ' <a href="#" data-iconv style="text-decoration:underline;margin-left:6px">Open chat</a>' : '') : '')
-    + row('Channel', i.platform ? esc(i.platform.replace(/^./, (c) => c.toUpperCase())) : '')
-    + row('Agent', esc(i.agent_name || ''))
-    + row('Pay to', i.address ? '<span class="mono" style="font-size:11.5px">' + esc(i.address) + '</span>' : '')
-    + row('Created', i.created ? esc(when(secT(i.created))) : '')
-    + row('Paid', i.confirmed_at ? esc(when(secT(i.confirmed_at))) : '')
-    + row('Cancelled', i.cancelled_at ? esc(when(secT(i.cancelled_at))) + (i.cancelled_by ? ' <span class="dim">· by ' + esc(i.cancelled_by) + '</span>' : '') : '')
-    + row('Reference', '<span class="mono dim">' + esc(i.id) + '</span>')
-    + '</dl><div class="iact">'
-    + (st !== 'confirmed' && !i.wiped_at ? '<button class="btn btn-p btn-s" type="button" data-ia="confirm">Mark as paid</button>' : '')
-    + (st === 'confirmed' && !i.delivered ? '<button class="btn btn-g btn-s" type="button" data-ia="confirm">Deliver again</button>' : '')
-    + (st === 'pending' ? '<button class="btn btn-g btn-s" type="button" data-ia="edit">Edit</button><button class="btn btn-g btn-s" type="button" data-ia="cancel">Cancel invoice</button>' : '')
-    + '<button class="btn btn-d btn-s" type="button" data-ia="delete" style="margin-left:auto">Delete</button></div>';
-  const v = await ask({ title: 'Invoice' + (i.description ? ' · ' + i.description : ''), html: html, wide: true, ok: false, cancel: 'Close',
+  const coin = String(i.coin || '').toUpperCase(), coinAmt = i.amount_coin || i.amount_coin_quoted;
+  const txt = (v) => '<span class="sv">' + v + '</span>';
+  const itemsL = Array.isArray(i.items) ? i.items.filter((x) => x && typeof x === 'object') : [];
+  // Only worth a row when it says more than "For" does.
+  const items = itemsL.length && !(itemsL.length === 1 && (+itemsL[0].qty || 1) === 1 && itemsL[0].name === i.description)
+    ? itemsL.map((x) => esc((x.qty > 1 ? x.qty + ' × ' : '') + (x.name || 'item'))).join('<br>') : '';
+  const who = [i.customer, i.customer_handle ? (String(i.customer_handle).startsWith('@') ? '' : '@') + i.customer_handle : ''].filter(Boolean).join(' ') || (d.conv && d.conv.name) || '';
+  const delivery = st === 'confirmed' ? (i.delivered ? 'Delivered' : 'Not delivered yet') : '';
+  const html = '<div class="ssum"><div><div class="amt">' + esc((i.amount_fiat || '—') + ' ' + (i.fiat || '')) + '</div>'
+      + '<div class="sub">' + (coinAmt ? esc(coinAmt + ' ' + coin) : esc(coin || '')) + (i.description ? ' · ' + esc(i.description) : '') + '</div></div>'
+      + '<div class="sst">' + invChip(st) + (delivery ? '<span class="sub">' + delivery + (i.manual_confirm ? ' · marked paid by hand' : '') + '</span>' : '') + '</div></div>'
+    + ssec('Order', (items ? srow('Items', txt(items)) : '') + srow('For', txt(esc(i.description || '—'))))
+    + ssec('Customer',
+        srow('Name', txt(esc(who || '—')) + (d.conv && d.conv.id ? '<button type="button" class="btn btn-g btn-s" data-iconv>Open chat</button>' : ''))
+      + (i.platform ? srow('Channel', txt(esc(i.platform.replace(/^./, (c) => c.toUpperCase())))) : '')
+      + (i.agent_name ? srow('Agent', txt(esc(i.agent_name))) : ''))
+    + ssec('Payment',
+        (i.address ? srow('Pay to', '<span class="sv mono addr">' + esc(i.address) + '</span><button type="button" class="btn btn-g btn-s" data-copy="' + esc(i.address) + '">Copy</button>') : '')
+      + srow('Created', txt(i.created ? esc(when(secT(i.created))) : '—'))
+      + (i.confirmed_at ? srow('Paid', txt(esc(when(secT(i.confirmed_at))))) : '')
+      + (i.cancelled_at ? srow('Cancelled', txt(esc(when(secT(i.cancelled_at))) + (i.cancelled_by ? ' <span class="dim">by ' + esc(i.cancelled_by) + '</span>' : ''))) : '')
+      + srow('Reference', txt('<span class="mono dim">' + esc(i.id) + '</span>')));
+  const btns = [{ id: 'delete', label: 'Delete', kind: 'd', side: 'left' }];
+  if (st === 'pending') btns.push({ id: 'cancel', label: 'Cancel invoice' }, { id: 'edit', label: 'Edit' });
+  if (st !== 'confirmed' && !i.wiped_at) btns.push({ id: 'confirm', label: 'Mark as paid', kind: 'p' });
+  if (st === 'confirmed' && !i.delivered) btns.push({ id: 'confirm', label: 'Deliver again', kind: 'p' });
+  if (btns.length === 1) btns.push({ id: 'close', label: 'Close' });
+  const r = await sheet({ title: 'Invoice', sub: 'Created ' + (i.created ? esc(when(secT(i.created))) : '—') + (d.conv && d.conv.name ? ' · ' + esc(d.conv.name) : ''), html: html, buttons: btns,
     onOpen: (el, done) => {
-      $$('[data-ia]', el).forEach((b) => b.addEventListener('click', () => done(b.dataset.ia)));
-      const oc = $('[data-iconv]', el); if (oc) oc.addEventListener('click', (e) => { e.preventDefault(); done('chat'); });
+      const oc = $('[data-iconv]', el); if (oc) oc.addEventListener('click', () => done({ action: 'chat' }));
+      $$('[data-copy]', el).forEach((b) => b.addEventListener('click', () => { try { navigator.clipboard.writeText(b.dataset.copy); b.textContent = 'Copied'; } catch (e) {} }));
     } });
-  if (!v) return;
+  if (!r) return;
+  const v = r.action;
   if (v === 'chat') return openConversation(acc, d.conv.id);
   const run = async (op, data, okMsg) => {
     try {
-      const r = await post('invoice_op', { acc: acc, inv: i.id, op: op, data: data || {} });
-      toast(op === 'confirm' ? (r.delivery === 'server' ? 'Marked as paid · delivering now' : r.delivery === 'app' ? 'Marked as paid · the seller’s app delivers it when it’s next open' : 'Marked as paid') : okMsg);
+      const res = await post('invoice_op', { acc: acc, inv: i.id, op: op, data: data || {} });
+      toast(op === 'confirm' ? (res.delivery === 'server' ? 'Marked as paid · delivering now' : res.delivery === 'app' ? 'Marked as paid · the seller’s app delivers it when it’s next open' : 'Marked as paid') : okMsg);
       refreshDrawer();
       if (op !== 'delete') openInvoice(acc, id);
     } catch (e) { toast(e.message, true); }
   };
   if (v === 'confirm') {
     if (!await ask({ title: st === 'confirmed' ? 'Deliver this order again?' : 'Mark this invoice as paid?', ok: st === 'confirmed' ? 'Deliver' : 'Mark as paid',
-      body: 'The customer gets the thank-you and what they bought, exactly as if the payment had arrived. Only do this if you’re sure they paid.' })) return;
+      body: 'The customer gets the thank-you and what they bought, as if the payment had arrived. Only do this if you’re sure they paid.' })) return openInvoice(acc, id);
     return run('confirm');
   }
-  if (v === 'cancel') { if (!await ask({ title: 'Cancel this invoice?', body: 'The customer can no longer pay it. You can still mark it as paid later if money arrives.', ok: 'Cancel invoice', cancel: 'Keep it', danger: true })) return; return run('cancel', null, 'Invoice cancelled'); }
-  if (v === 'delete') { if (!await ask({ title: 'Delete this invoice?', body: 'It’s removed from the seller’s payments list for good. Sales already recorded from it stay.', ok: 'Delete', danger: true })) return; return run('delete', null, 'Invoice deleted'); }
+  if (v === 'cancel') { if (!await ask({ title: 'Cancel this invoice?', body: 'The customer can no longer pay it. You can still mark it as paid later.', ok: 'Cancel invoice', cancel: 'Keep it', danger: true })) return openInvoice(acc, id); return run('cancel', null, 'Invoice cancelled'); }
+  if (v === 'delete') { if (!await ask({ title: 'Delete this invoice?', body: 'It’s removed from the seller’s payments for good. Sales already recorded from it stay.', ok: 'Delete', danger: true })) return openInvoice(acc, id); return run('delete', null, 'Invoice deleted'); }
   if (v === 'edit') {
-    let w = null;
-    const ok = await ask({ title: 'Edit invoice', wide: false, ok: 'Save', html: '<div class="pf">'
-        + '<label class="full"><span>For</span><input class="inp" id="ie-desc" value="' + esc(i.description || '') + '" maxlength="500"></label>'
-        + '<label><span>Amount</span><input class="inp" id="ie-amt" value="' + esc(i.amount_fiat || '') + '" inputmode="decimal"></label>'
-        + '<label><span>Currency</span><input class="inp mono" id="ie-fiat" value="' + esc(i.fiat || 'USD') + '" maxlength="4" style="text-transform:uppercase"></label>'
-        + '</div><p class="dim" style="font-size:12px;margin:10px 0 0">The customer was already given ' + (coinAmt ? esc(coinAmt + ' ' + String(i.coin || '').toUpperCase()) : 'an amount') + ' to pay; changing the price here doesn’t change that.</p>',
-      onOpen: (el) => { w = el; } });
-    if (!ok || !w) return openInvoice(acc, id);
-    return run('edit', { description: $('#ie-desc', w).value, amount_fiat: $('#ie-amt', w).value.trim(), fiat: $('#ie-fiat', w).value.trim().toUpperCase() }, 'Invoice updated');
+    const e = await sheet({ title: 'Edit invoice', narrow: true, focus: true, html: ssec('',
+        srow('For', '<input class="inp" id="ie-desc" value="' + esc(i.description || '') + '" maxlength="500">')
+      + srow('Amount', '<input class="inp" id="ie-amt" value="' + esc(i.amount_fiat || '') + '" inputmode="decimal"><input class="inp cur" id="ie-fiat" value="' + esc(i.fiat || 'USD') + '" maxlength="4" aria-label="Currency">',
+          coinAmt ? 'They were asked for ' + esc(coinAmt + ' ' + coin) + '; that doesn’t change' : '')),
+      buttons: [{ id: 'close', label: 'Cancel' }, { id: 'save', label: 'Save', kind: 'p' }] });
+    if (!e) return openInvoice(acc, id);
+    return run('edit', { description: $('#ie-desc', e.el).value, amount_fiat: $('#ie-amt', e.el).value.trim(), fiat: $('#ie-fiat', e.el).value.trim().toUpperCase() }, 'Invoice updated');
   }
 }
 
